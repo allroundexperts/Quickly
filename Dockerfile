@@ -24,8 +24,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # install runtime dependencies
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt constraints.txt ./
+# constraints.txt pins the full resolved tree so rebuilds are reproducible;
+# regenerate it when requirements.txt changes (see the header in that file)
+RUN pip install --no-cache-dir -c constraints.txt -r requirements.txt
 
 # copy backend source code
 COPY app/ ./app/
