@@ -64,9 +64,9 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           push: ${{ github.event_name != 'workflow_dispatch' || inputs.push_image }}
-          outputs: type=image,name=azowail/quickly,push-by-digest=true,name-canonical=true
-          cache-from: type=registry,ref=azowail/quickly:cache-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
-          cache-to: type=registry,ref=azowail/quickly:cache-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }},mode=max
+          outputs: type=image,name=allroundexperts/quickly,push-by-digest=true,name-canonical=true
+          cache-from: type=registry,ref=allroundexperts/quickly:cache-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          cache-to: type=registry,ref=allroundexperts/quickly:cache-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }},mode=max
 
       - name: Export digest
         run: |
@@ -112,9 +112,9 @@ jobs:
         working-directory: /tmp/digests
         run: |
           docker buildx imagetools create \
-            -t azowail/quickly:${{ steps.tagger.outputs.TAG }} \
-            -t azowail/quickly:latest \
-            $(printf 'azowail/quickly@sha256:%s ' *)
+            -t allroundexperts/quickly:${{ steps.tagger.outputs.TAG }} \
+            -t allroundexperts/quickly:latest \
+            $(printf 'allroundexperts/quickly@sha256:%s ' *)
 
   release:
     runs-on: ubuntu-24.04
@@ -146,8 +146,8 @@ jobs:
           body: |
             ## What's in this release
 
-            Docker image: `azowail/quickly:${{ steps.tagger.outputs.TAG }}`
-            Also tagged as: `azowail/quickly:latest`
+            Docker image: `allroundexperts/quickly:${{ steps.tagger.outputs.TAG }}`
+            Also tagged as: `allroundexperts/quickly:latest`
 
             ---
 
@@ -188,7 +188,7 @@ jobs:
 
             ### ☁️ Option 2 — PaaS (Railway, Render, Fly.io, etc.)
 
-            1. Create a new service using Docker image `azowail/quickly:${{ steps.tagger.outputs.TAG }}`
+            1. Create a new service using Docker image `allroundexperts/quickly:${{ steps.tagger.outputs.TAG }}`
             2. Add a managed PostgreSQL database; set its connection string as `DATABASE_URL`
             3. Set `BASE_URL` to your platform's assigned URL
             4. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`
