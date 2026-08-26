@@ -1,7 +1,7 @@
 # multi-stage Dockerfile for quick, minimal production image
 
 # 1. build the React frontend
-FROM node:22-slim AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:22-slim AS frontend-builder
 WORKDIR /app/frontend
 
 # copy only package.json (NOT lockfile) — npm ci + lockfile is broken
