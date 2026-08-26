@@ -63,7 +63,19 @@ In Railway: **New Project → Deploy a Docker image**
 
 In your Railway project, click **+ New → Database → Add PostgreSQL**.
 
-Railway automatically injects `DATABASE_URL` as an environment variable — Quickly picks this up with no extra configuration.
+Railway does **not** share the database's variables with your other services automatically — you have to link them. In the **Quickly service** (not the Postgres one), go to **Variables → New Variable** and add a reference to the Postgres service:
+
+```env
+DATABASE_URL=${{Postgres.DATABASE_URL}}
+```
+
+Replace `Postgres` with the exact name of your database service if you renamed it. Quickly rewrites the `postgres://` scheme to `postgresql+asyncpg://` on startup, so paste the value as-is.
+
+> **If you skip this step**, Quickly falls back to its local default (`postgresql+asyncpg://postgres:postgres@localhost/quickly`), and the container exits at boot with:
+> ```
+> ConnectionRefusedError: [Errno 111] Connection refused
+> ERROR:    Application startup failed. Exiting.
+> ```
 
 **3. Set your environment variables.**
 
@@ -894,6 +906,19 @@ python -c "import secrets; print(secrets.token_urlsafe(64))"
 
 - `DATABASE_URL` is set automatically by `docker-compose.yml` — don't override it unless you have a custom PostgreSQL setup
 - If you did override it, make sure the hostname is `db` (the Docker service name), not `localhost`
+
+### `ConnectionRefusedError: [Errno 111] Connection refused` at startup
+
+```
+ConnectionRefusedError: [Errno 111] Connection refused
+ERROR:    Application startup failed. Exiting.
+```
+
+Quickly connects to PostgreSQL before it serves the first request, so an unreachable database kills the container at boot. `Errno 111` means something answered at the network level with "nothing is listening here" — almost always because `DATABASE_URL` is missing and Quickly fell back to its default of `localhost`, where no PostgreSQL is running inside the container.
+
+- **Railway / PaaS:** add `DATABASE_URL=${{Postgres.DATABASE_URL}}` to the **Quickly service's** variables. Railway does not share database variables across services on its own — see [Option A, step 2](#option-a-railway--paas-no-server-needed)
+- **Docker Compose:** confirm the `db` service is healthy (`docker compose ps`) and that the app's `DATABASE_URL` host is `db`, not `localhost`
+- **External / managed Postgres:** verify the host and port, and that the database allows connections from your app's IP
 
 ### Gmail OAuth errors
 
