@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
+import { useAuth } from './AuthContext';
 
 const NotificationsContext = createContext({ count: 0, refresh: () => {} });
 
@@ -15,6 +16,11 @@ const NotificationsContext = createContext({ count: 0, refresh: () => {} });
 export function NotificationsProvider({ children }) {
   const [count, setCount] = useState(0);
   const timerRef = useRef(null);
+  // The provider sits above the auth gate, so it also mounts on /login. Only
+  // poll once a user is signed in — an unauthenticated GET 401s, and api.js
+  // sends the browser to /login on a failed refresh, which reloads the login
+  // page and remounts this provider in a loop.
+  const { user } = useAuth();
 
   const refresh = useCallback(async () => {
     try {
@@ -27,17 +33,22 @@ export function NotificationsProvider({ children }) {
 
   // Polling fallback every 30 s.
   useEffect(() => {
+    if (!user) {
+      setCount(0);
+      return;
+    }
     refresh();
     timerRef.current = setInterval(refresh, 30_000);
     return () => clearInterval(timerRef.current);
-  }, [refresh]);
+  }, [refresh, user]);
 
   // Refresh when the window regains focus (e.g. user switches back from Notifications page).
   useEffect(() => {
+    if (!user) return;
     const onFocus = () => refresh();
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [refresh]);
+  }, [refresh, user]);
 
   return (
     <NotificationsContext.Provider value={{ count, refresh }}>

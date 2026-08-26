@@ -32,6 +32,19 @@ function scheduleReloadIfRestoreComplete(res) {
   }
 }
 
+/**
+ * Send the browser to the login page after an unrecoverable 401.
+ *
+ * No-op when we are already on /login: assigning the current URL to
+ * location.href triggers a full document reload, so an unauthenticated
+ * request fired from the login page would reload it, remount the app, fire
+ * again, and loop forever.
+ */
+function redirectToLogin() {
+  if (window.location.pathname === '/login') return;
+  window.location.href = '/login';
+}
+
 async function _refreshAccessToken() {
   if (_refreshPromise) return _refreshPromise;
   _refreshPromise = fetch(API_ROOT + '/auth/refresh', {
@@ -79,7 +92,7 @@ async function request(path, options = {}) {
       return retryData;
     } catch {
       // Refresh failed – redirect to login
-      window.location.href = '/login';
+      redirectToLogin();
       throw new Error('Session expired');
     }
   }
@@ -116,7 +129,7 @@ async function downloadRequest(path) {
       return res;
     } catch (e) {
       if (e.status) throw e;
-      window.location.href = '/login';
+      redirectToLogin();
       throw new Error('Session expired');
     }
   }
@@ -157,7 +170,7 @@ async function downloadPostRequest(path, data) {
       return res;
     } catch (e) {
       if (e.status) throw e;
-      window.location.href = '/login';
+      redirectToLogin();
       throw new Error('Session expired');
     }
   }
@@ -199,7 +212,7 @@ export const api = {
         }
         return retryRes.json();
       } catch {
-        window.location.href = '/login';
+        redirectToLogin();
         throw new Error('Session expired');
       }
     }
@@ -237,7 +250,7 @@ export const api = {
         }
         return retryRes.json();
       } catch {
-        window.location.href = '/login';
+        redirectToLogin();
         throw new Error('Session expired');
       }
     }
