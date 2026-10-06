@@ -617,6 +617,10 @@ async def run_send_job():
                 lead_data["unsubscribe_link"] = unsub_url
 
                 body = render_body(seq_body, lead_data)
+                # Plain-text body upgraded to HTML for tracking: escape it and
+                # turn newlines into <br> so line breaks survive HTML rendering.
+                if format_override == "tracking_upgraded_to_html":
+                    body = _plain_to_quoted_html(body.strip())
                 # Inject hidden preheader so email clients show the custom preview text.
                 if is_html and seq_preview_text:
                     rendered_preview = render_body(seq_preview_text, lead_data)
@@ -1344,6 +1348,10 @@ async def send_slot_job(slot_id: int) -> None:
         lead_data["unsubscribe_link"] = unsub_url
 
         body = render_body(seq_body, lead_data)
+        # Plain-text body upgraded to HTML for tracking: escape it and turn
+        # newlines into <br> so line breaks survive HTML rendering.
+        if format_override == "tracking_upgraded_to_html":
+            body = _plain_to_quoted_html(body.strip())
         if is_html and seq_preview_text:
             rendered_preview = render_body(seq_preview_text, lead_data)
             preheader = (
