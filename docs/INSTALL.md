@@ -16,6 +16,7 @@
 - [Step 2: First Login & User Setup](#step-2-first-login--user-setup)
 - [Step 3A: Connect Gmail Inboxes](#step-3a-connect-gmail-inboxes)
 - [Step 3B: Connect Office 365 / Outlook Inboxes](#step-3b-connect-office-365--outlook-inboxes)
+- [Step 3C: Connect Amazon SES (via SMTP)](#step-3c-connect-amazon-ses-via-smtp)
 - [Step 4: Create Your First Campaign](#step-4-create-your-first-campaign)
 - [Optional: AI Reply Classification](#optional-ai-reply-classification)
 - [Quickly Beacon (recommended custom tracking hostnames)](#quickly-beacon-recommended-custom-tracking-hostnames)
@@ -152,8 +153,8 @@ mkdir quickly && cd quickly
 **2. Download Compose and env template.**
 
 ```bash
-curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose.no-caddy.yml
-curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/docker-compose.no-caddy.yml
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/.env.example
 mv .env.example .env
 ```
 
@@ -210,9 +211,9 @@ If this volume does not exist yet, `docker compose up` will fail — the file ex
 ```bash
 mkdir quickly && cd quickly
 
-curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose.yml
-curl -LO https://github.com/azowail/quickly/releases/latest/download/Caddyfile
-curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/docker-compose.yml
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/Caddyfile
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/.env.example
 mv .env.example .env
 ```
 
@@ -312,12 +313,12 @@ Choose this if **Caddy is already on your VPS** for other sites and you **do not
    docker volume create quickly_pgdata
    ```
 
-2. Download **`docker-compose-not-host.yml`** from the [releases page](https://github.com/azowail/quickly/releases/latest) (bundled beside `docker-compose.yml`), plus **`.env.example`**:
+2. Download **`docker-compose-not-host.yml`** from the [releases page](https://github.com/AbdelftahZowail/Quickly/releases/latest) (bundled beside `docker-compose.yml`), plus **`.env.example`**:
 
    ```bash
    mkdir quickly && cd quickly
-   curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose-not-host.yml
-   curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
+   curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/docker-compose-not-host.yml
+   curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/.env.example
    mv .env.example .env
    ```
 
@@ -446,7 +447,7 @@ docker compose up -d
 The fastest way to run everything locally with hot-reload:
 
 ```bash
-git clone https://github.com/azowail/quickly.git
+git clone https://github.com/AbdelftahZowail/Quickly.git
 cd quickly
 cp .env.example .env
 # Edit .env and set: BASE_URL=http://localhost:8000
@@ -464,7 +465,7 @@ Open `http://localhost:5173` — the frontend hot-reloads on changes; the backen
 **1. Clone the repo and set up Python.**
 
 ```bash
-git clone https://github.com/azowail/quickly.git
+git clone https://github.com/AbdelftahZowail/Quickly.git
 cd quickly
 
 python -m venv .venv
@@ -566,6 +567,7 @@ For programmatic access (n8n, scripts, custom integrations), generate API keys f
 
 - → [Step 3A: Connect Gmail Inboxes](#step-3a-connect-gmail-inboxes)
 - → [Step 3B: Connect Office 365 / Outlook Inboxes](#step-3b-connect-office-365--outlook-inboxes)
+- → [Step 3C: Connect Amazon SES (via SMTP)](#step-3c-connect-amazon-ses-via-smtp)
 - → [Connect both Gmail and Office 365](#connecting-both-gmail-and-office-365)
 
 ---
@@ -626,11 +628,16 @@ docker compose up -d
 
 Skip this if you're happy with scheduled polling for reply detection.
 
-1. Go to **Pub/Sub → Topics → Create Topic**
-2. Topic ID: `quickly-gmail-push` (or any name you prefer)
-3. Create a **Push subscription** on the topic pointing to: `https://yourdomain.com/api/unibox/gmail/push`
-4. In the topic's **Permissions** tab, grant `gmail-api-push@system.gserviceaccount.com` the **Pub/Sub Publisher** role
-5. In Quickly, go to **Settings → Gmail Sync** and enter the full topic name (e.g. `projects/your-project/topics/quickly-gmail-push`)
+1. In Quickly, go to **Settings → Gmail Sync** and copy the **Push Webhook Token** (and note the exact push URL the page shows — it already includes the token).
+2. Go to **Pub/Sub → Topics → Create Topic**
+3. Topic ID: `quickly-gmail-push` (or any name you prefer)
+4. Create a **Push subscription** on the topic pointing to: `https://yourdomain.com/api/unibox/gmail/push?token=<Push Webhook Token from Settings → Gmail Sync>`
+5. In the topic's **Permissions** tab, grant `gmail-api-push@system.gserviceaccount.com` the **Pub/Sub Publisher** role
+6. Back in **Settings → Gmail Sync**, enter the full topic name (e.g. `projects/your-project/topics/quickly-gmail-push`)
+
+> **The `?token=` query parameter is mandatory.** The push endpoint authenticates every request against the token shown in **Settings → Gmail Sync**; a request without it (or with a wrong one) is rejected with `401 Unauthorized`. The Settings page displays the complete URL to copy — use that instead of typing the URL by hand.
+>
+> **Upgrading from an older version?** Push tokens were introduced in the release that fixed unauthenticated Gmail push delivery. Any existing Pub/Sub push subscription still points at `/api/unibox/gmail/push` with no token and will start returning `401`, which silently stops real-time reply detection. Edit the subscription's endpoint URL and append `?token=<Push Webhook Token>` after upgrading.
 
 > **This is the most involved step in the whole guide.** IAM roles, push subscriptions, and topic naming are easy to get wrong. If you're hitting errors, search "Google Cloud Pub/Sub push subscription setup" or ask an AI chatbot to walk you through it — describe that you need a push subscription that forwards to a webhook URL, with the Gmail push service account as publisher.
 
@@ -706,6 +713,78 @@ docker compose up -d
 **7. Connect accounts in Quickly.**
 
 Go to **Inboxes → Add Inbox → Connect Office 365 Account** and complete the OAuth flow.
+
+---
+
+## Step 3C: Connect Amazon SES (via SMTP)
+
+> Amazon SES (Simple Email Service) works with Quickly's generic **SMTP provider** — no extra integration code is needed. You use SES's SMTP interface, so Quickly treats it like any other SMTP relay.
+
+### 1. Get SES SMTP credentials
+
+1. In the AWS console, go to **SES → SMTP settings → Create SMTP credentials**
+2. This creates an IAM user and shows you an **SMTP username / password pair** (shown once — save them). These are *not* regular AWS access keys and can't be interchanged with them.
+3. Note your region's SMTP endpoint, e.g. `email-smtp.us-east-1.amazonaws.com` (replace `us-east-1` with your region)
+
+> SMTP credentials are **unique to each AWS region** — sending from a second region needs a second set. Also note some newer/smaller regions have no SMTP endpoint at all (only the API); if yours doesn't, pick a region that does.
+
+### 2. Verify your sending identity
+
+In **SES → Verified identities**, verify the domain or email address you will send from. Quickly's inbox email must match a verified identity, otherwise SES rejects every send.
+
+> **Sandbox warning:** new SES accounts start in the **sandbox**: you can only send *to* verified addresses and throughput is capped. Request **production access** (SES → Account dashboard) before running real campaigns.
+
+### 3. Add the inbox in Quickly
+
+Go to **Inboxes → Add Inbox → SMTP (any provider)** and fill in:
+
+| Field | Value |
+|---|---|
+| Email address | Your verified sender address |
+| SMTP host | `email-smtp.<region>.amazonaws.com` |
+| SMTP port | `587` with **STARTTLS** (or `465` with **SSL**) |
+| SMTP username / password | The SMTP credentials from step 1 |
+| IMAP | Leave empty — SES is send-only (see below) |
+
+Quickly tests the connection automatically after creation.
+
+### Notes and limits
+
+- **Replies:** SES has no mailbox, so there is nothing for IMAP reply-sync to connect to. SES inboxes are **send-only**: replies won't appear in the Unibox unless you route them elsewhere (e.g. set SES to forward replies to a Gmail/IMAP mailbox you also connect).
+- **Bounces:** sends rejected at SMTP time (unverified identity, sandbox violation) surface as `email.bounced` and the lead is marked bounced automatically. Delayed bounces via SNS notifications are not integrated — if you need those, configure SES to forward bounce mail to a monitored mailbox.
+- **Limits:** SES enforces per-region daily quotas and send rates. Mirror them in the inbox's **Max emails per day** and **Wait between emails** so Quickly never outruns your SES limits.
+- **Broken credentials auto-pause:** if the relay rejects authentication (e.g. `535 Authentication failed`), Quickly **pauses the inbox** and fires a `token_expired` notification (with `provider: "smtp"`) instead of retrying forever. Fix the credentials, then resume the inbox from **Inboxes → Resume**.
+
+### Updating SMTP credentials from the command line
+
+`SmtpAccount.smtp_password` / `imap_password` are stored as Fernet ciphertext, so a plain `UPDATE smtp_account SET smtp_password = 'my-password'` would store a value the app cannot decrypt. The UI/API encrypts automatically; for headless setups use the helper script, which derives the same key the app uses:
+
+```bash
+# Reads quickly_encryption_key from the app_setting table (or set
+# QUICKLY_ENCRYPTION_KEY in the environment instead of --key-from-db)
+python scripts/encrypt_secret.py --key-from-db --inbox-id 7 --sql
+
+# → UPDATE smtp_account SET smtp_password = 'gAAAAA...', updated_at = NOW() WHERE inbox_id = 7;
+```
+
+Run the printed statement with `psql`, then test the connection from the inbox UI (or `POST /api/smtp/inboxes/7/test`). `--decrypt 'gAAAAA...'` verifies an existing value; `--key` / `--password` are available for scripted use. If `QUICKLY_ENCRYPTION_KEY` is not set, the app auto-generates a key and stores it under `quickly_encryption_key` in `app_setting` — that is what `--key-from-db` reads.
+
+By default the generated statement updates `smtp_password`. Pass `--column imap_password` to update the IMAP secret instead:
+
+```bash
+python scripts/encrypt_secret.py --key-from-db --inbox-id 7 --column imap_password --sql
+# → UPDATE smtp_account SET imap_password = 'gAAAAA...', updated_at = NOW() WHERE inbox_id = 7;
+```
+
+Docker deployments: run the helper inside the application container, where the app's dependencies are installed (production `docker-compose.yml` names this service `app`; the `backend` service only exists in `docker-compose.dev.yml`):
+
+```bash
+# Production
+docker compose exec app python scripts/encrypt_secret.py --key-from-db --inbox-id 7 --sql
+
+# Development (docker-compose.dev.yml)
+docker compose -f docker-compose.dev.yml exec backend python scripts/encrypt_secret.py --key-from-db --inbox-id 7 --sql
+```
 
 ---
 

@@ -26,6 +26,7 @@ from sqlalchemy.orm import relationship
 from app.time import utcnow as _utcnow
 
 from app.database import Base
+from app.security import EncryptedText
 
 
 def _make_public_id() -> str:
@@ -98,7 +99,7 @@ class Inbox(Base):
     max_emails_per_day = Column(Integer, default=50, nullable=False)
     wait_minutes_between = Column(Integer, default=5, nullable=False)  # Minutes between emails from this inbox
     max_jitter_seconds = Column(Integer, default=180, nullable=False)   # Max random seconds added to each send time (0 = disabled)
-    provider = Column(String(32), default="gmail")  # gmail | office365
+    provider = Column(String(32), default="gmail")  # gmail | office365 | smtp
     # Custom tracking domain for this inbox (hostname only, e.g. "mail.client.com").
     # When set, open/click tracking URLs for emails sent from this inbox will use
     # https://<tracking_domain>/o/... instead of the app's own base URL.
@@ -127,6 +128,9 @@ class Inbox(Base):
     office365_sync_state = relationship("Office365SyncState", uselist=False, cascade="all, delete-orphan")
     office365_threads = relationship("Office365Thread", back_populates="inbox", cascade="all, delete-orphan")
     office365_graph_subscription = relationship("Office365GraphSubscription", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
+    smtp_account = relationship("SmtpAccount", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
+    smtp_sync_state = relationship("SmtpSyncState", uselist=False, cascade="all, delete-orphan")
+    smtp_threads = relationship("SmtpThread", back_populates="inbox", cascade="all, delete-orphan")
 
 
 class Lead(Base):
@@ -171,6 +175,9 @@ class Campaign(Base):
     track_clicks = Column(Boolean, default=False, nullable=False)
     # Unsubscribe
     add_unsubscribe_header = Column(Boolean, default=True, nullable=False)
+    # RFC 8058 one-click header (List-Unsubscribe-Post). Required by Gmail/Yahoo
+    # bulk-sender rules; disable if Gmail's Promotions classifier is an issue.
+    add_one_click_unsubscribe = Column(Boolean, default=True, nullable=False)
     # Plain-text sending options
     send_first_as_text = Column(Boolean, default=False, nullable=False)  # Force seq 0 to plain text
     send_all_as_text = Column(Boolean, default=False, nullable=False)    # Force every sequence to plain text
@@ -718,6 +725,114 @@ class Office365GraphSubscription(Base):
     inbox = relationship("Inbox", back_populates="office365_graph_subscription")
 
 
+# ---------------------------------------------------------------------------
+# Generic SMTP / IMAP integration models
+# ---------------------------------------------------------------------------
+
+class SmtpAccount(Base):
+    """Stores per-inbox SMTP (outbound) + IMAP (inbound reply sync) credentials.
+
+    Passwords use :class:`app.security.EncryptedText` so they are encrypted
+    with Fernet when ``QUICKLY_ENCRYPTION_KEY`` is configured and stored as
+    plaintext otherwise (same fallback behaviour as the rest of the app).
+    """
+    __tablename__ = "smtp_account"
+    id = Column(Integer, primary_key=True, index=True)
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), nullable=False, unique=True)
+    # Outbound SMTP
+    smtp_host = Column(String(255), nullable=False, default="")
+    smtp_port = Column(Integer, nullable=False, default=587)
+    smtp_username = Column(String(255), nullable=False, default="")
+    smtp_password = Column(EncryptedText, nullable=False, default="")
+    smtp_use_tls = Column(Boolean, default=True, nullable=False)  # STARTTLS on port 587
+    smtp_use_ssl = Column(Boolean, default=False, nullable=False)  # implicit SSL on port 465
+    # Inbound IMAP (reply sync into Unibox; optional but recommended)
+    imap_host = Column(String(255), nullable=False, default="")
+    imap_port = Column(Integer, nullable=False, default=993)
+    imap_username = Column(String(255), nullable=False, default="")
+    imap_password = Column(EncryptedText, nullable=False, default="")
+    imap_use_ssl = Column(Boolean, default=True, nullable=False)
+    # Last connection-test result (surfaced in system health + inbox UI)
+    last_tested_at = Column(DateTime, nullable=True)
+    last_test_ok = Column(Boolean, default=False, nullable=False)
+    last_test_error = Column(Text, default="")
+    # Last full staged diagnostic (Diagnose button / CLI).  JSON report so the
+    # inbox UI can redraw the per-stage breakdown without re-probing.
+    last_diagnostic_at = Column(DateTime, nullable=True)
+    last_diagnostic_json = Column(Text, default="")
+    # Last real send failure (written for permanent AND transient failures, so
+    # "active but nothing sends" is visible instead of silently retried).
+    last_send_error = Column(Text, default="")
+    last_send_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    inbox = relationship("Inbox", back_populates="smtp_account")
+
+
+class SmtpSyncState(Base):
+    """Tracks IMAP sync checkpoints per SMTP inbox (UIDVALIDITY + last seen UID)."""
+    __tablename__ = "smtp_sync_state"
+    id = Column(Integer, primary_key=True, index=True)
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), nullable=False, unique=True)
+    uidvalidity = Column(BigInteger, nullable=True)
+    last_uid = Column(Integer, nullable=False, default=0)
+    last_sync_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    inbox = relationship("Inbox", back_populates="smtp_sync_state")
+
+
+class SmtpThread(Base):
+    """Local thread mirror for SMTP inboxes, keyed by the root RFC Message-ID."""
+    __tablename__ = "smtp_thread"
+    __table_args__ = (
+        Index("ix_smtp_thread_inbox_last_date", "inbox_id", "last_received_at"),
+    )
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), primary_key=True)
+    thread_key = Column(String(512), primary_key=True)  # normalised root Message-ID (with <>)
+    subject = Column(Text, default="")
+    last_received_at = Column(DateTime, nullable=True)
+    is_lead_thread = Column(Boolean, default=False, nullable=False)
+    unread_lead_reply = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    inbox = relationship("Inbox", back_populates="smtp_threads")
+    messages = relationship("SmtpMessage", back_populates="thread", cascade="all, delete-orphan")
+
+
+class SmtpMessage(Base):
+    """Local SMTP/IMAP message mirror (sent + received)."""
+    __tablename__ = "smtp_message"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["inbox_id", "thread_key"],
+            ["smtp_thread.inbox_id", "smtp_thread.thread_key"],
+            name="fk_smtp_message_thread",
+            ondelete="CASCADE",
+        ),
+        Index("ix_smtp_message_inbox_thread_date", "inbox_id", "thread_key", "received_at"),
+        Index("ix_smtp_message_inbox_received", "inbox_id", "received_at"),
+        Index("ix_smtp_message_rfc_id", "rfc_message_id"),
+    )
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), primary_key=True)
+    message_id = Column(String(512), primary_key=True)  # IMAP "uidvalidity:uid" or "local-<hash>" for sent
+    thread_key = Column(String(512), nullable=False)
+    rfc_message_id = Column(String(512), nullable=True)  # RFC 822 Message-ID (with <>)
+    in_reply_to = Column(String(512), nullable=True)
+    received_at = Column(DateTime, nullable=True)
+    subject = Column(Text, default="")
+    from_address = Column(String(255), default="")
+    to_addresses = Column(Text, default="")  # JSON array of recipients
+    body_plain = Column(Text, default="")
+    body_html = Column(Text, default="")
+    is_read = Column(Boolean, default=False, nullable=False)
+    direction = Column(String(16), default="received", nullable=False)  # received | sent
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    inbox = relationship("Inbox")
+    thread = relationship("SmtpThread", back_populates="messages")
+
+
 class Webhook(Base):
     """User-defined outbound webhook endpoints.
 
@@ -843,5 +958,6 @@ WEBHOOK_EVENT_TYPES = [
     "lead.auto_reply",     # AI classified a lead's reply as an automated reply
     "daily_limit",         # An inbox hit its daily sending limit
     "rate_limit",          # A rate limit violation was detected
-    "token_expired",       # A Gmail OAuth token could not be refreshed
+    "token_expired",       # OAuth refresh or SMTP/IMAP login failed (see data.provider/error_type)
+    "inbox.send_failing",  # An SMTP inbox failed to send repeatedly (see data.last_send_error)
 ]

@@ -1,8 +1,12 @@
 """Pydantic schemas for API and validation."""
 from pydantic import AliasChoices, BaseModel, EmailStr, Field
-from typing import Optional, Dict, Any, List
+from typing import Literal, Optional, Dict, Any, List
 from datetime import datetime, time
 from app.models import WEBHOOK_EVENT_TYPES
+
+# Known inbox providers. "resend" is a legacy value still present on old rows
+# (gmail_oauth reverts disconnected Gmail inboxes to it), so it stays allowed.
+INBOX_PROVIDERS = Literal["gmail", "office365", "smtp", "resend"]
 
 
 class LeadCampaignInfo(BaseModel):
@@ -95,7 +99,7 @@ class InboxCreate(BaseModel):
     max_emails_per_day: int = 50
     wait_minutes_between: int = 5
     max_jitter_seconds: int = 180
-    provider: str = "gmail"  # gmail | office365
+    provider: INBOX_PROVIDERS = "gmail"  # gmail | office365 | smtp
     tracking_domain: Optional[str] = None  # custom hostname for tracking links
     ramp_up_enabled: bool = False
     ramp_up_period_days: int = 42
@@ -108,7 +112,7 @@ class InboxUpdate(BaseModel):
     max_emails_per_day: Optional[int] = None
     wait_minutes_between: Optional[int] = None
     max_jitter_seconds: Optional[int] = None
-    provider: Optional[str] = None
+    provider: Optional[INBOX_PROVIDERS] = None
     tracking_domain: Optional[str] = None  # set to "" to clear
     ramp_up_enabled: Optional[bool] = None
     ramp_up_period_days: Optional[int] = None
@@ -159,6 +163,11 @@ class InboxResponse(BaseModel):
     sent_today: int = 0
     # how many future queue slots are pending on this inbox right now
     pending_leads: int = 0
+    # Real health for SMTP inboxes (ok/failing/unknown); None for OAuth providers,
+    # whose health is surfaced via System Health instead.
+    health: Optional[str] = None
+    last_send_error: str = ""
+    last_send_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -171,7 +180,7 @@ class PauseInboxRequest(BaseModel):
 
 class ConnectUrlRequest(BaseModel):
     """Parameters for generating a one-time OAuth connect URL for a new inbox."""
-    provider: str = "gmail"  # gmail | office365
+    provider: str = "gmail"  # gmail | office365 (smtp inboxes need no OAuth)
     display_name: str = ""
     max_per_day: int = 50
     wait_minutes_between: int = 5
@@ -280,6 +289,8 @@ class CampaignCreate(BaseModel):
     track_clicks: bool = False
     # Unsubscribe header
     add_unsubscribe_header: bool = True
+    # Include the RFC 8058 one-click header (List-Unsubscribe-Post)
+    add_one_click_unsubscribe: bool = True
     # Plain-text options
     send_first_as_text: bool = False
     send_all_as_text: bool = False
@@ -304,6 +315,7 @@ class CampaignUpdate(BaseModel):
     track_opens: Optional[bool] = None
     track_clicks: Optional[bool] = None
     add_unsubscribe_header: Optional[bool] = None
+    add_one_click_unsubscribe: Optional[bool] = None
     send_first_as_text: Optional[bool] = None
     send_all_as_text: Optional[bool] = None
     timezone: Optional[str] = None
@@ -362,6 +374,7 @@ class CampaignResponse(BaseModel):
     track_opens: bool = False
     track_clicks: bool = False
     add_unsubscribe_header: bool = True
+    add_one_click_unsubscribe: bool = True
     send_first_as_text: bool = False
     send_all_as_text: bool = False
     timezone: Optional[str] = None

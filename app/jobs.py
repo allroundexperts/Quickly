@@ -48,6 +48,97 @@ from app.campaign_lead_status import campaign_lead_may_receive_sends
 log = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Inbox auth-failure circuit breaker
+# ---------------------------------------------------------------------------
+# A broken credential (SMTP 535, revoked OAuth grant, …) is deterministic:
+# retrying every scan tick only piles up connections, blocking SMTP calls and
+# duplicate failure notifications.  After an auth failure we
+#   (a) pause the inbox in the DB (persists across restarts), and
+#   (b) trip an in-memory cooldown so slots already dispatched for that inbox
+#       in the same scan tick skip immediately instead of each attempting
+#       another login.
+_AUTH_FAILURE_COOLDOWN = timedelta(minutes=15)
+_inbox_auth_cooldown_until: dict[int, datetime] = {}
+
+
+def _inbox_auth_cooldown_active(inbox_id: int, now: datetime) -> bool:
+    """Return True while *inbox_id* is inside its post-auth-failure cooldown."""
+    until = _inbox_auth_cooldown_until.get(inbox_id)
+    if not until:
+        return False
+    if until <= now:
+        _inbox_auth_cooldown_until.pop(inbox_id, None)
+        return False
+    return True
+
+
+def _mark_inbox_auth_failure(inbox_id: int, now: datetime) -> None:
+    """Trip the in-memory cooldown for *inbox_id*."""
+    _inbox_auth_cooldown_until[inbox_id] = now + _AUTH_FAILURE_COOLDOWN
+
+
+def clear_inbox_auth_failure(inbox_id: int) -> None:
+    """Clear the in-memory auth-failure cooldown for *inbox_id*.
+
+    Call this whenever the operator has plausibly fixed the credential —
+    resuming a paused inbox or passing an SMTP connection test — so queued
+    slots are attempted again immediately instead of being skipped for the
+    rest of the 15-minute cooldown.
+    """
+    _inbox_auth_cooldown_until.pop(inbox_id, None)
+
+
+def _auth_failure_event_data(inbox: Inbox, result: SendFailure) -> dict:
+    """Build a correctly-labelled auth-failure event payload for notifications."""
+    return {
+        "inbox_id": inbox.id,
+        "inbox_email": inbox.email,
+        "provider": inbox.provider or "gmail",
+        "error_type": result.error_type,
+        "error": result.message,
+        "timestamp": time_provider.utcnow().isoformat() + "Z",
+    }
+
+
+async def _alert_repeated_send_failure(
+    session: AsyncSession, inbox: Inbox, last_send_error: str = ""
+) -> None:
+    """Fire a webhook/notification once an inbox crosses the failure threshold.
+
+    Transient connection failures used to be swallowed: the email log row was
+    deleted, the slot kept, and the inbox kept showing a green "Active" badge
+    while nothing was delivered.  Persisting ``last_send_error`` makes the
+    failure visible; this makes it *alertable*.
+    """
+    from app.smtp_utils import (
+        SMTP_FAILURE_NOTIFY_THRESHOLD,
+        smtp_failure_streak,
+        reset_smtp_failure_streak,
+    )
+
+    streak = smtp_failure_streak(inbox.id)
+    if streak < SMTP_FAILURE_NOTIFY_THRESHOLD:
+        # Alert once per failure run (when the streak first reaches the
+        # threshold), not on every subsequent attempt — but *do* fire when the
+        # streak is already past the threshold, otherwise a run that includes
+        # permanent failures as well as transient ones never alerts at all.
+        return
+    reset_smtp_failure_streak(inbox.id)
+    await fire_webhook_event(
+        session,
+        "inbox.send_failing",
+        {
+            "inbox_id": inbox.id,
+            "inbox_email": inbox.email,
+            "provider": inbox.provider or "gmail",
+            "consecutive_failures": streak,
+            "last_send_error": last_send_error or "unknown error",
+            "timestamp": time_provider.utcnow().isoformat() + "Z",
+        },
+    )
+
+
 async def _update_enrollment_after_send(session: AsyncSession, cl: CampaignLead, campaign: Campaign, sequence: Sequence) -> None:
     n_seq = (
         await session.execute(
@@ -118,6 +209,11 @@ async def run_send_job():
         _fallback_tracking_base = _settings.base_url.rstrip("/")
 
         for inbox in inboxes:
+            if _inbox_auth_cooldown_active(inbox.id, now):
+                log.warning(
+                    "Send job: inbox %s in auth-failure cooldown – skipping", inbox.email
+                )
+                continue
             # compute how many emails already sent today so we enforce a hard
             # daily cap rather than only relying on ``sent_this_inbox`` below.
             # Use the warmup-aware effective limit so ramp-up is respected.
@@ -203,6 +299,7 @@ async def run_send_job():
             gmail_token = ""
             ga = None
             o365_account = None
+            smtp_account = None
             simulate_send = False
 
             if inbox.provider == "office365":
@@ -210,11 +307,26 @@ async def run_send_job():
                     select(Office365Account).where(Office365Account.inbox_id == inbox.id)
                 )
                 o365_account = o365_res.scalar_one_or_none()
-                if o365_account:
-                    pass
-                else:
+                if o365_account is None:
                     log.warning("Office 365 inbox %s (%s) has no Office365Account — skipping", inbox.id, inbox.email)
                     continue
+            elif inbox.provider == "smtp":
+                from app.models import SmtpAccount as _SmtpAccount
+                smtp_res = await session.execute(
+                    select(_SmtpAccount).where(_SmtpAccount.inbox_id == inbox.id)
+                )
+                smtp_account = smtp_res.scalar_one_or_none()
+                if smtp_account is None:
+                    if settings.test_mode:
+                        log.info(
+                            "Test mode: SMTP inbox %s (%s) has no SmtpAccount -- simulating send",
+                            inbox.id,
+                            inbox.email,
+                        )
+                        simulate_send = True
+                    else:
+                        log.warning("SMTP inbox %s (%s) has no SmtpAccount — skipping", inbox.id, inbox.email)
+                        continue
             else:
                 # Default: Gmail
                 ga_result = await session.execute(
@@ -631,7 +743,8 @@ async def run_send_job():
                     )
                     body = preheader + body
                 from_addr = inbox.email
-                from_name = inbox.display_name or ""
+                # Render lead variables in the sender name too (e.g. "Jane at Acme")
+                from_name = render_body(inbox.display_name or "", lead_data)
 
                 # ── phase 1: pre-create EmailLog to get an ID for tracking ──
                 email_log_entry = EmailLog(
@@ -700,7 +813,7 @@ async def run_send_job():
 
                 # ── Append quoted previous email (follow-up sequences only) ──
                 if prev_sent_at and (prev_email_body_html or prev_email_body_plain):
-                    _from_name = inbox.display_name or inbox.email
+                    _from_name = render_body(inbox.display_name or inbox.email, lead_data)
                     _from_email = inbox.email
                     if is_html:
                         _prev_html = prev_email_body_html or _plain_to_quoted_html(prev_email_body_plain)
@@ -716,8 +829,15 @@ async def run_send_job():
 
                 # Unsubscribe header
                 list_unsub_url = unsub_url if getattr(campaign, 'add_unsubscribe_header', True) else None
+                list_unsub_one_click = bool(getattr(campaign, "add_one_click_unsubscribe", True))
 
                 # ── phase 3: send ────────────────────────────────────────────
+                # Commit before the network call.  The pre-created EmailLog row
+                # and tracking tokens must exist, but keeping the transaction
+                # open across a blocking SMTP/HTTP send leaves connections
+                # "idle in transaction" and exhausts the pool when many sends
+                # run concurrently.
+                await session.commit()
                 if simulate_send:
                     fake_thread_id = prev_thread_id or f"test-thread-{email_log_entry.id}"
                     result = SendResult(
@@ -726,29 +846,54 @@ async def run_send_job():
                         gmail_message_id=f"test-gmail-{email_log_entry.id}",
                     )
                 else:
-                    result = send_email(
-                        to_email=lead.email,
-                        subject=subject,
-                        body=send_body,
-                        from_email=from_addr,
-                        from_name=from_name,
-                        reply_to_msg_id=reply_to_msg_id,
-                        references=references_chain,
-                        is_html=is_html,
-                        provider=inbox.provider or "gmail",
-                        gmail_access_token=gmail_token,
-                        gmail_account=ga,
-                        thread_id=prev_thread_id,
-                        list_unsubscribe_url=list_unsub_url,
-                        google_client_id=g_client_id,
-                        google_client_secret=g_client_secret,
-                        office365_account=o365_account,
-                        office365_client_id=o365_client_id,
-                        office365_client_secret=o365_client_secret,
-                        office365_tenant_id=o365_tenant_id,
-                        conversation_id=prev_thread_id if inbox.provider == "office365" else None,
-                        reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
-                    )
+                    # ``send_email`` is synchronous (smtplib / urllib / Gmail
+                    # client) — run it in a worker thread so a slow or hanging
+                    # relay cannot stall the event loop (and every HTTP request
+                    # served by it).
+                    try:
+                        result = await asyncio.to_thread(
+                            send_email,
+                            to_email=lead.email,
+                            subject=subject,
+                            body=send_body,
+                            from_email=from_addr,
+                            from_name=from_name,
+                            reply_to_msg_id=reply_to_msg_id,
+                            references=references_chain,
+                            is_html=is_html,
+                            provider=inbox.provider or "gmail",
+                            gmail_access_token=gmail_token,
+                            gmail_account=ga,
+                            thread_id=prev_thread_id,
+                            list_unsubscribe_url=list_unsub_url,
+                            list_unsubscribe_one_click=list_unsub_one_click,
+                            google_client_id=g_client_id,
+                            google_client_secret=g_client_secret,
+                            office365_account=o365_account,
+                            office365_client_id=o365_client_id,
+                            office365_client_secret=o365_client_secret,
+                            office365_tenant_id=o365_tenant_id,
+                            conversation_id=prev_thread_id if inbox.provider == "office365" else None,
+                            reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
+                            smtp_account=smtp_account,
+                        )
+                    except Exception:
+                        # ``send_email`` handles the expected failures itself,
+                        # so reaching here means an unexpected error.  The
+                        # pre-created EmailLog row was already committed above;
+                        # leaving it behind would count against the inbox's
+                        # daily quota, inflate campaign ``emails_sent`` and make
+                        # queue recalculation think this step had been sent.
+                        # Remove it, then let the caller's handler log the error
+                        # (the slot stays queued for a retry).
+                        log.exception(
+                            "Send job: send_email raised for lead_id=%s inbox=%s; "
+                            "rolling back pre-created email log",
+                            lead.id, inbox.email,
+                        )
+                        await session.delete(email_log_entry)
+                        await session.commit()
+                        raise
 
                 # ── Handle permanent failure (bounce / auth) ─────────────────
                 if isinstance(result, SendFailure):
@@ -789,11 +934,17 @@ async def run_send_job():
                             "timestamp": time_provider.utcnow().isoformat() + "Z",
                         })
                     elif result.error_type in ("auth_failed", "permission_denied"):
-                        await fire_webhook_event(session, "token_expired", {
-                            "inbox_id": inbox.id,
-                            "inbox_email": inbox.email,
-                            "error": result.message,
-                        })
+                        _mark_inbox_auth_failure(inbox.id, now)
+                        if not inbox.paused:
+                            log.warning(
+                                "Send job: pausing inbox %s after %s — sending stops until "
+                                "credentials are fixed and the inbox is resumed",
+                                inbox.email, result.error_type,
+                            )
+                            inbox.paused = True
+                        await fire_webhook_event(
+                            session, "token_expired", _auth_failure_event_data(inbox, result)
+                        )
                         # Stop processing this inbox — auth is broken
                         break
                     continue
@@ -801,6 +952,9 @@ async def run_send_job():
                 if not result:
                     # Transient failure — roll back the pre-created log; slot stays for retry
                     await session.delete(email_log_entry)
+                    await _alert_repeated_send_failure(
+                        session, inbox, getattr(smtp_account, "last_send_error", "") or ""
+                    )
                     continue
 
                 # ── success: update log and consume the slot ─────────────────
@@ -816,7 +970,7 @@ async def run_send_job():
 
                 # For Gmail: save the sent message to the local mirror so the body
                 # is available for quoting in future follow-up emails.
-                if inbox.provider != "office365" and email_log_entry.thread_id:
+                if inbox.provider not in ("office365", "smtp") and email_log_entry.thread_id:
                     try:
                         from app.unibox import upsert_sent_message as _upsert_sent_gmail
                         await _upsert_sent_gmail(
@@ -857,6 +1011,29 @@ async def run_send_job():
                     except Exception:
                         log.exception(
                             "Failed to upsert sent O365 message to unibox "
+                            "inbox_id=%s lead=%s",
+                            inbox.id, lead.email,
+                        )
+
+                # For SMTP: immediately save the sent message to the local
+                # mirror so it appears in the unibox thread before the next sync.
+                if inbox.provider == "smtp" and email_log_entry.thread_id:
+                    try:
+                        from app.unibox import upsert_sent_smtp_message
+                        await upsert_sent_smtp_message(
+                            session,
+                            inbox_id=inbox.id,
+                            thread_key=email_log_entry.thread_id,
+                            internet_message_id=result.message_id,
+                            subject=subject,
+                            to_email=lead.email,
+                            from_email=inbox.email,
+                            body=send_body,
+                            is_html=is_html,
+                        )
+                    except Exception:
+                        log.exception(
+                            "Failed to upsert sent SMTP message to unibox "
                             "inbox_id=%s lead=%s",
                             inbox.id, lead.email,
                         )
@@ -987,6 +1164,12 @@ async def send_slot_job(slot_id: int) -> None:
         if inbox.paused:
             log.info("send_slot_job: inbox %s paused, skipping slot %d", inbox.email, slot_id)
             return
+        if _inbox_auth_cooldown_active(inbox.id, now):
+            log.warning(
+                "send_slot_job: inbox %s in auth-failure cooldown, skipping slot %d",
+                inbox.email, slot_id,
+            )
+            return
         if getattr(campaign, "paused", False):
             log.info("send_slot_job: campaign %d paused, skipping slot %d", campaign.id, slot_id)
             return
@@ -1075,6 +1258,7 @@ async def send_slot_job(slot_id: int) -> None:
         gmail_token = ""
         ga = None
         o365_account = None
+        smtp_account = None
         simulate_send = False
 
         from app.settings_manager import settings as _settings
@@ -1087,14 +1271,31 @@ async def send_slot_job(slot_id: int) -> None:
                 select(Office365Account).where(Office365Account.inbox_id == inbox.id)
             )
             o365_account = o365_res.scalar_one_or_none()
-            if o365_account:
-                pass
-            else:
+            if o365_account is None:
                 log.warning(
                     "send_slot_job: O365 inbox %s has no Office365Account – skipping slot %d",
                     inbox.email, slot_id,
                 )
                 return
+        elif inbox.provider == "smtp":
+            from app.models import SmtpAccount as _SmtpAccount2
+            smtp_res = await session.execute(
+                select(_SmtpAccount2).where(_SmtpAccount2.inbox_id == inbox.id)
+            )
+            smtp_account = smtp_res.scalar_one_or_none()
+            if smtp_account is None:
+                if settings.test_mode:
+                    log.info(
+                        "send_slot_job: test mode SMTP inbox %s has no SmtpAccount -- simulating send",
+                        inbox.email,
+                    )
+                    simulate_send = True
+                else:
+                    log.warning(
+                        "send_slot_job: SMTP inbox %s has no SmtpAccount – skipping slot %d",
+                        inbox.email, slot_id,
+                    )
+                    return
         else:
             ga_result = await session.execute(
                 select(GmailAccount).where(GmailAccount.inbox_id == inbox.id)
@@ -1362,7 +1563,8 @@ async def send_slot_job(slot_id: int) -> None:
             body = preheader + body
 
         from_addr = inbox.email
-        from_name = inbox.display_name or ""
+        # Render lead variables in the sender name too (e.g. "Jane at Acme")
+        from_name = render_body(inbox.display_name or "", lead_data)
 
         # ── Pre-create EmailLog to get an ID for tracking ─────────────────
         email_log_entry = EmailLog(
@@ -1424,7 +1626,7 @@ async def send_slot_job(slot_id: int) -> None:
 
         # ── Append quoted previous email ──────────────────────────────────
         if prev_sent_at and (prev_email_body_html or prev_email_body_plain):
-            _from_name = inbox.display_name or inbox.email
+            _from_name = render_body(inbox.display_name or inbox.email, lead_data)
             _from_email = inbox.email
             if is_html:
                 _prev_html = prev_email_body_html or _plain_to_quoted_html(prev_email_body_plain)
@@ -1435,8 +1637,14 @@ async def send_slot_job(slot_id: int) -> None:
                     send_body = send_body + build_quote_plain(_prev_plain, _from_name, _from_email, prev_sent_at)
 
         list_unsub_url = unsub_url if getattr(campaign, "add_unsubscribe_header", True) else None
+        list_unsub_one_click = bool(getattr(campaign, "add_one_click_unsubscribe", True))
 
         # ── Send ──────────────────────────────────────────────────────────
+        # Commit before the network call.  The pre-created EmailLog row and
+        # tracking tokens must exist, but keeping the transaction open across
+        # a blocking SMTP/HTTP send leaves connections "idle in transaction"
+        # and exhausts the pool when many slots are due at once.
+        await session.commit()
         if simulate_send:
             fake_thread_id = prev_thread_id or f"test-thread-{email_log_entry.id}"
             result = SendResult(
@@ -1445,29 +1653,49 @@ async def send_slot_job(slot_id: int) -> None:
                 gmail_message_id=f"test-gmail-{email_log_entry.id}",
             )
         else:
-            result = send_email(
-                to_email=lead.email,
-                subject=subject,
-                body=send_body,
-                from_email=from_addr,
-                from_name=from_name,
-                reply_to_msg_id=reply_to_msg_id,
-                references=references_chain,
-                is_html=is_html,
-                provider=inbox.provider or "gmail",
-                gmail_access_token=gmail_token,
-                gmail_account=ga,
-                thread_id=prev_thread_id,
-                list_unsubscribe_url=list_unsub_url,
-                google_client_id=g_client_id,
-                google_client_secret=g_client_secret,
-                office365_account=o365_account,
-                office365_client_id=o365_client_id,
-                office365_client_secret=o365_client_secret,
-                office365_tenant_id=o365_tenant_id,
-                conversation_id=prev_thread_id if inbox.provider == "office365" else None,
-                reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
-            )
+            # ``send_email`` is synchronous (smtplib / urllib / Gmail client) —
+            # run it in a worker thread so a slow or hanging relay cannot stall
+            # the event loop (and every HTTP request served by it).
+            try:
+                result = await asyncio.to_thread(
+                    send_email,
+                    to_email=lead.email,
+                    subject=subject,
+                    body=send_body,
+                    from_email=from_addr,
+                    from_name=from_name,
+                    reply_to_msg_id=reply_to_msg_id,
+                    references=references_chain,
+                    is_html=is_html,
+                    provider=inbox.provider or "gmail",
+                    gmail_access_token=gmail_token,
+                    gmail_account=ga,
+                    thread_id=prev_thread_id,
+                    list_unsubscribe_url=list_unsub_url,
+                    list_unsubscribe_one_click=list_unsub_one_click,
+                    google_client_id=g_client_id,
+                    google_client_secret=g_client_secret,
+                    office365_account=o365_account,
+                    office365_client_id=o365_client_id,
+                    office365_client_secret=o365_client_secret,
+                    office365_tenant_id=o365_tenant_id,
+                    conversation_id=prev_thread_id if inbox.provider == "office365" else None,
+                    reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
+                    smtp_account=smtp_account,
+                )
+            except Exception:
+                # Unexpected error from send_email: the pre-created EmailLog row
+                # was committed before the network call.  Drop it so it does not
+                # consume daily quota / count as a sent campaign step, then let
+                # _dispatch_slot's handler log it (the slot stays queued).
+                log.exception(
+                    "send_slot_job: send_email raised for slot %d (lead_id=%s); "
+                    "rolling back pre-created email log",
+                    slot_id, lead.id,
+                )
+                await session.delete(email_log_entry)
+                await session.commit()
+                raise
 
         # ── Permanent failure ─────────────────────────────────────────────
         if isinstance(result, SendFailure):
@@ -1497,15 +1725,26 @@ async def send_slot_job(slot_id: int) -> None:
                     "timestamp": time_provider.utcnow().isoformat() + "Z",
                 })
             elif result.error_type in ("auth_failed", "permission_denied"):
-                await fire_webhook_event(session, "token_expired", {
-                    "inbox_id": inbox.id, "inbox_email": inbox.email, "error": result.message,
-                })
+                _mark_inbox_auth_failure(inbox.id, now)
+                if not inbox.paused:
+                    log.warning(
+                        "send_slot_job: pausing inbox %s after %s — sending stops until "
+                        "credentials are fixed and the inbox is resumed",
+                        inbox.email, result.error_type,
+                    )
+                    inbox.paused = True
+                await fire_webhook_event(
+                    session, "token_expired", _auth_failure_event_data(inbox, result)
+                )
             await session.commit()
             return
 
         if not result:
             # Transient failure – roll back the pre-created log; slot stays for retry
             await session.delete(email_log_entry)
+            await _alert_repeated_send_failure(
+                session, inbox, getattr(smtp_account, "last_send_error", "") or ""
+            )
             await session.commit()
             log.warning("send_slot_job: transient failure for slot %d, slot retained for retry", slot_id)
             return
@@ -1516,7 +1755,7 @@ async def send_slot_job(slot_id: int) -> None:
         await session.delete(slot)
         await _update_enrollment_after_send(session, cl, campaign, sequence)
 
-        if inbox.provider != "office365" and email_log_entry.thread_id:
+        if inbox.provider not in ("office365", "smtp") and email_log_entry.thread_id:
             try:
                 from app.unibox import upsert_sent_message as _upsert_sent_gmail
                 await _upsert_sent_gmail(
@@ -1554,6 +1793,26 @@ async def send_slot_job(slot_id: int) -> None:
             except Exception:
                 log.exception(
                     "send_slot_job: failed to upsert sent O365 message "
+                    "inbox_id=%s lead=%s", inbox.id, lead.email,
+                )
+
+        if inbox.provider == "smtp" and email_log_entry.thread_id:
+            try:
+                from app.unibox import upsert_sent_smtp_message
+                await upsert_sent_smtp_message(
+                    session,
+                    inbox_id=inbox.id,
+                    thread_key=email_log_entry.thread_id,
+                    internet_message_id=result.message_id,
+                    subject=subject,
+                    to_email=lead.email,
+                    from_email=inbox.email,
+                    body=send_body,
+                    is_html=is_html,
+                )
+            except Exception:
+                log.exception(
+                    "send_slot_job: failed to upsert sent SMTP message "
                     "inbox_id=%s lead=%s", inbox.id, lead.email,
                 )
 
@@ -1627,6 +1886,12 @@ async def _dispatch_slot(slot_id: int, delay: float) -> None:
         if delay > 0:
             await asyncio.sleep(delay)
         await send_slot_job(slot_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Never let a failed task take the scheduler down (or die silently):
+        # the slot stays queued and the next scan retries it.
+        log.exception("send_slot_job: unhandled error for slot_id=%s", slot_id)
     finally:
         _pending_slot_ids.discard(slot_id)
 

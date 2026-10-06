@@ -21,9 +21,22 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+# Explicit HTTP transport so Gmail API calls cannot hang forever.  The library
+# default (httplib2 without a timeout) lets a black-holed connection occupy its
+# worker thread indefinitely, which now matters because sends run in a
+# ``asyncio.to_thread`` worker.  ``google_auth_httplib2`` and ``httplib2`` both
+# ship with ``google-api-python-client``; the import is guarded so a minimal
+# environment degrades to the previous behaviour instead of failing to boot.
+try:  # pragma: no cover - exercised implicitly by every Gmail send
+    import httplib2
+    from google_auth_httplib2 import AuthorizedHttp
+except Exception:  # pragma: no cover - optional dependency
+    httplib2 = None  # type: ignore[assignment]
+    AuthorizedHttp = None  # type: ignore[assignment]
+
 from app.settings_manager import settings
 from app import time as time_provider
-from app.models import GmailAccount, Office365Account
+from app.models import GmailAccount, Office365Account, SmtpAccount
 from app.routers.gmail_oauth import refresh_access_token  # needed for token refresh when sending via gmail
 from app.routers.office365_oauth import refresh_access_token as refresh_office365_token
 
@@ -291,6 +304,7 @@ def _build_email_message(
     is_html: bool = False,
     message_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
+    list_unsubscribe_one_click: bool = True,
 ) -> EmailMessage:
     """Build an EmailMessage using Python's stdlib email module (policy.SMTP)."""
     msg = EmailMessage(policy=email.policy.SMTP)
@@ -332,7 +346,12 @@ def _build_email_message(
 
     if list_unsubscribe_url:
         msg["List-Unsubscribe"] = f"<{list_unsubscribe_url}>"
-        msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+        # RFC 8058 one-click unsubscribe.  Gmail/Yahoo require it for bulk
+        # senders, but some senders prefer to omit it because Gmail's tab
+        # classifier can treat one-click mail as Promotions.  Opt-out is
+        # per campaign (``add_one_click_unsubscribe``).
+        if list_unsubscribe_one_click:
+            msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
     return msg
 
@@ -348,6 +367,7 @@ def build_raw_mime(
     is_html: bool = False,
     message_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
+    list_unsubscribe_one_click: bool = True,
 ) -> str:
     """
     Build a raw RFC 2822 MIME string and return it base64url-encoded for
@@ -371,6 +391,7 @@ def build_raw_mime(
         is_html=is_html,
         message_id=message_id,
         list_unsubscribe_url=list_unsubscribe_url,
+        list_unsubscribe_one_click=list_unsubscribe_one_click,
     )
     return base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
 
@@ -388,6 +409,7 @@ def _send_via_gmail(
     gmail_account: GmailAccount | None = None,
     thread_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
+    list_unsubscribe_one_click: bool = True,
     google_client_id: str = "",
     google_client_secret: str = "",
     retry_on_auth_fail: bool = True,
@@ -431,9 +453,28 @@ def _send_via_gmail(
     creds = Credentials(**creds_kwargs)  # type: ignore[arg-type]
 
     # construct the gmail service; ``cache_discovery=False`` avoids writing
-    # files to disk in environments without a home directory.
+    # files to disk in environments without a home directory.  An explicit
+    # ``AuthorizedHttp`` transport carries a socket timeout so a stalled Gmail
+    # endpoint cannot hang the worker thread forever.
     try:
-        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        http = None
+        if httplib2 is not None and AuthorizedHttp is not None:
+            from app.smtp_utils import smtp_timeout_seconds
+
+            http = AuthorizedHttp(
+                creds, http=httplib2.Http(timeout=smtp_timeout_seconds())
+            )
+        if http is not None:
+            try:
+                service = build(
+                    "gmail", "v1", http=http, cache_discovery=False
+                )
+            except TypeError:
+                # Some integrations/tests patch ``build`` with a simplified
+                # callable that only accepts the original keyword set.
+                service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        else:
+            service = build("gmail", "v1", credentials=creds, cache_discovery=False)
     except Exception as e:
         log.error("Failed to build Gmail service: %s", e)
         return None
@@ -451,6 +492,7 @@ def _send_via_gmail(
         is_html=is_html,
         message_id=message_id,
         list_unsubscribe_url=list_unsubscribe_url,
+        list_unsubscribe_one_click=list_unsubscribe_one_click,
     )
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
@@ -568,6 +610,7 @@ def _send_via_gmail(
                         gmail_account=gmail_account,
                         thread_id=thread_id,
                         list_unsubscribe_url=list_unsubscribe_url,
+                        list_unsubscribe_one_click=list_unsubscribe_one_click,
                         google_client_id=google_client_id,
                         google_client_secret=google_client_secret,
                         retry_on_auth_fail=False,
@@ -615,6 +658,7 @@ def send_email(
     gmail_account: Optional[GmailAccount] = None,
     thread_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
+    list_unsubscribe_one_click: bool = True,
     google_client_id: str = "",
     google_client_secret: str = "",
     office365_account: Optional[Office365Account] = None,
@@ -623,6 +667,7 @@ def send_email(
     office365_tenant_id: str = "",
     conversation_id: Optional[str] = None,
     reply_graph_message_id: Optional[str] = None,
+    smtp_account: Optional[SmtpAccount] = None,
 ) -> Optional[SendResult | SendFailure]:
     """Send one email via Gmail API or Microsoft Graph API.
 
@@ -657,6 +702,24 @@ def send_email(
             thread_id=thread_id or conversation_id or "fake-thread",
         )
 
+    if provider == "smtp":
+        if not smtp_account:
+            log.error("send_email: no SMTP credentials for %s", from_email)
+            return SendFailure(error_type="auth_failed", message="No SMTP credentials provided")
+        return _send_via_smtp(
+            to_email=to_email,
+            subject=subject,
+            body=body,
+            from_email=from_email,
+            from_name=from_name,
+            reply_to_msg_id=reply_to_msg_id,
+            references=references,
+            is_html=is_html,
+            smtp_account=smtp_account,
+            list_unsubscribe_url=list_unsubscribe_url,
+            list_unsubscribe_one_click=list_unsubscribe_one_click,
+        )
+
     if provider == "office365":
         if not office365_account:
             log.error("send_email: no Office 365 credentials for %s", from_email)
@@ -673,6 +736,7 @@ def send_email(
             office365_account=office365_account,
             conversation_id=conversation_id,
             list_unsubscribe_url=list_unsubscribe_url,
+            list_unsubscribe_one_click=list_unsubscribe_one_click,
             office365_client_id=office365_client_id,
             office365_client_secret=office365_client_secret,
             office365_tenant_id=office365_tenant_id,
@@ -697,6 +761,7 @@ def send_email(
         gmail_account=gmail_account,
         thread_id=thread_id,
         list_unsubscribe_url=list_unsubscribe_url,
+        list_unsubscribe_one_click=list_unsubscribe_one_click,
         google_client_id=google_client_id,
         google_client_secret=google_client_secret,
     )
@@ -749,6 +814,7 @@ def _send_via_office365(
     office365_account: Office365Account | None = None,
     conversation_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
+    list_unsubscribe_one_click: bool = True,
     office365_client_id: str = "",
     office365_client_secret: str = "",
     office365_tenant_id: str = "",
@@ -798,6 +864,7 @@ def _send_via_office365(
         is_html=is_html,
         message_id=message_id,
         list_unsubscribe_url=list_unsubscribe_url,
+        list_unsubscribe_one_click=list_unsubscribe_one_click,
     )
     raw_mime: bytes = mime_msg.as_bytes()
 
@@ -938,6 +1005,7 @@ def _send_via_office365(
                         office365_account=office365_account,
                         conversation_id=conversation_id,
                         list_unsubscribe_url=list_unsubscribe_url,
+                        list_unsubscribe_one_click=list_unsubscribe_one_click,
                         office365_client_id=office365_client_id,
                         office365_client_secret=office365_client_secret,
                         office365_tenant_id=office365_tenant_id,
@@ -965,6 +1033,190 @@ def _send_via_office365(
         )
         log.error("Office 365 Graph API error: %s", e)
         return None
+
+
+# ---- Generic SMTP sending ----
+
+_SMTP_LOG_PATH = _LOG_DIR / "smtp_api.log"
+
+
+def _log_smtp_call(
+    to_email: str,
+    from_email: str,
+    subject: str,
+    *,
+    thread_id: Optional[str] = None,
+    status: str = "SENDING",
+    response: str = "",
+    error: Optional[str] = None,
+) -> None:
+    """Append a log entry for every SMTP send (mirrors the Gmail/O365 logs)."""
+    entry = {
+        "timestamp": time_provider.utcnow().isoformat() + "Z",
+        "to": to_email,
+        "from": from_email,
+        "subject": subject,
+        "thread_id": thread_id,
+        "status": status,
+    }
+    if response:
+        entry["response"] = response
+    if error:
+        entry["error"] = error
+    try:
+        with open(_SMTP_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, indent=2) + "\n---\n")
+    except OSError:
+        log.warning("Could not write to smtp log file at %s", _SMTP_LOG_PATH)
+
+
+def _send_via_smtp(
+    to_email: str,
+    subject: str,
+    body: str,
+    from_email: str,
+    from_name: str = "",
+    reply_to_msg_id: Optional[str] = None,
+    references: Optional[str] = None,
+    is_html: bool = False,
+    smtp_account: SmtpAccount | None = None,
+    list_unsubscribe_url: Optional[str] = None,
+    list_unsubscribe_one_click: bool = True,
+) -> Optional[SendResult | SendFailure]:
+    """Send one email via a generic SMTP relay (stdlib ``smtplib``).
+
+    Threading works exactly like the Gmail path: follow-ups carry
+    ``In-Reply-To`` / ``References`` and reuse the root ``Message-ID`` as the
+    thread key, so the unibox IMAP sync can group them without any
+    provider-specific thread API.
+    """
+    if not smtp_account:
+        log.error("SMTP send: no account provided for %s", from_email)
+        return SendFailure(error_type="auth_failed", message="No SMTP account")
+    if not (smtp_account.smtp_host or "").strip():
+        return SendFailure(error_type="auth_failed", message="SMTP host is not configured")
+
+    import smtplib
+    import socket
+
+    message_id = make_msgid()
+    mime_msg = _build_email_message(
+        to_email=to_email,
+        subject=subject,
+        body=body,
+        from_email=from_email,
+        from_name=from_name,
+        reply_to_msg_id=reply_to_msg_id,
+        references=references,
+        is_html=is_html,
+        message_id=message_id,
+        list_unsubscribe_url=list_unsubscribe_url,
+        list_unsubscribe_one_click=list_unsubscribe_one_click,
+    )
+    raw_bytes: bytes = mime_msg.as_bytes()
+    # Thread key: the root message of the chain (first References entry) or
+    # our own Message-ID for a new thread.  Stored on EmailLog.thread_id so
+    # follow-ups, unibox grouping, and In-Reply-To all stay consistent.
+    if references:
+        thread_key = references.split()[0]
+    elif reply_to_msg_id:
+        thread_key = reply_to_msg_id if reply_to_msg_id.startswith("<") else f"<{reply_to_msg_id}>"
+    else:
+        thread_key = message_id
+
+    _log_smtp_call(to_email, from_email, subject, thread_id=thread_key)
+    try:
+        from app.smtp_utils import _smtp_connect, smtp_timeout_seconds
+
+        # Bounded socket timeout: a relay that accepts the connection but never
+        # answers must not hold the worker (and its DB session) open forever.
+        client = _smtp_connect(smtp_account, timeout=smtp_timeout_seconds())
+        try:
+            client.sendmail(from_email, [to_email], raw_bytes)
+        finally:
+            try:
+                client.quit()
+            except Exception:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        _log_smtp_call(
+            to_email, from_email, subject,
+            thread_id=thread_key,
+            status="250 OK",
+            response=json.dumps({"message_id": message_id, "thread_key": thread_key}),
+        )
+        log.info("SMTP: sent to=%s message_id=%s thread_key=%s", to_email, message_id, thread_key)
+        # Clear any persisted failure so the inbox shows "ok" again.
+        try:
+            from app.smtp_utils import record_smtp_send_success
+
+            smtp_account.last_send_error = ""
+            record_smtp_send_success(smtp_account)
+        except Exception:  # pragma: no cover - observability must never break a send
+            log.debug("Failed to clear SMTP send-error state", exc_info=True)
+        return SendResult(message_id=message_id, thread_id=thread_key, gmail_message_id=None)
+    except smtplib.SMTPRecipientsRefused as e:
+        err = str(e)[:300]
+        _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=err)
+        # Recipient-level rejection — a bad lead address, not a broken inbox.
+        # Do NOT record it as an inbox send failure (that would flip the inbox
+        # health to "failing" and can trip the repeated-failure alert).
+        return SendFailure(error_type="invalid_recipient", message=f"SMTP recipient refused: {err}")
+    except smtplib.SMTPSenderRefused as e:
+        err = str(e)[:300]
+        _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=err)
+        # Sender-side failure (bad envelope auth, relay policy, MAIL FROM rejected) —
+        # NOT a recipient bounce. jobs.py handles "auth_failed" by pausing the inbox
+        # instead of marking leads as bounced (which would irreversibly poison the
+        # campaign when only the relay configuration is broken).
+        _record_smtp_failure(smtp_account, f"SMTP sender refused: {err}")
+        return SendFailure(error_type="auth_failed", message=f"SMTP sender refused: {err}")
+    except smtplib.SMTPDataError as e:
+        err = str(e)[:300]
+        _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=err)
+        # 5xx at DATA time is a permanent rejection (content/policy); 4xx is transient.
+        code = getattr(e, "smtp_code", 0) or 0
+        if 500 <= code < 600:
+            # Per-message content/policy rejection — not proof the inbox itself
+            # is broken, so don't mark the whole inbox failing.
+            return SendFailure(error_type="bounce", message=f"SMTP rejected the message ({code}): {err}")
+        _record_smtp_failure(smtp_account, f"SMTP DATA error ({code}): {err}")
+        return None
+    except smtplib.SMTPAuthenticationError as e:
+        err = str(e)[:300]
+        _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=err)
+        _record_smtp_failure(smtp_account, f"SMTP authentication failed: {err}")
+        return SendFailure(error_type="auth_failed", message=f"SMTP authentication failed: {err}")
+    except (smtplib.SMTPException, socket.error, OSError) as e:
+        _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=str(e)[:300])
+        log.error("SMTP send error: %s", e)
+        # Transient connection error (refused/timeout/TLS).  Previously this was
+        # swallowed entirely — now it is persisted so the inbox UI can warn.
+        _record_smtp_failure(smtp_account, f"SMTP connection error: {e}")
+        return None
+    except Exception as e:
+        _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=str(e)[:300])
+        log.error("SMTP send error: %s", e)
+        _record_smtp_failure(smtp_account, f"SMTP send error: {e}")
+        return None
+
+
+def _record_smtp_failure(smtp_account, error: str) -> int:
+    """Persist a send failure on the SMTP account; return the failure streak.
+
+    Fire-and-forget from the sender's perspective: observability must never
+    turn a send failure into a crash.  The caller (jobs.py) flushes the session
+    so the column is persisted.
+    """
+    try:
+        from app.smtp_utils import record_smtp_send_error
+
+        return record_smtp_send_error(smtp_account, error)
+    except Exception:  # pragma: no cover - defensive
+        log.debug("Failed to record SMTP send error", exc_info=True)
+        return 0
 
 
 def _fetch_sent_message_ids(

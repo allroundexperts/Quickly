@@ -303,6 +303,7 @@ List all campaigns with aggregated stats.
   "track_opens": false,
   "track_clicks": false,
   "add_unsubscribe_header": true,
+  "add_one_click_unsubscribe": true,
   "send_first_as_text": false,
   "send_all_as_text": false,
   "stats": {
@@ -345,6 +346,7 @@ Create a new campaign.
 | `track_opens` | bool | No | `false` | Enable open tracking pixel |
 | `track_clicks` | bool | No | `false` | Enable click tracking |
 | `add_unsubscribe_header` | bool | No | `true` | Add List-Unsubscribe header |
+| `add_one_click_unsubscribe` | bool | No | `true` | Also send the RFC 8058 `List-Unsubscribe-Post` one-click header. Required by Gmail/Yahoo for bulk senders; disable if Gmail routes your mail to Promotions (keep the plain header on). Only applies when `add_unsubscribe_header` is true. |
 | `send_first_as_text` | bool | No | `false` | Send first sequence as plain text |
 | `send_all_as_text` | bool | No | `false` | Send all sequences as plain text |
 | `match_lead_provider` | bool | No | `false` | Prefer Gmail inboxes for Google leads, Office 365 inboxes for Microsoft leads |
@@ -776,7 +778,7 @@ Import leads from a CSV file. Expects an `email` column; `name` and any extra co
 
 ## Inboxes
 
-Inboxes are sending email addresses connected via Gmail OAuth or Office 365 OAuth. Each inbox has its own daily limit, optional warm-up ramp, optional jitter, and optional custom tracking domain.
+Inboxes are sending email addresses connected via Gmail OAuth, Office 365 OAuth, or generic SMTP credentials (Amazon SES or any SMTP relay + optional IMAP for reply sync). Each inbox has its own daily limit, optional warm-up ramp, optional jitter, and optional custom tracking domain.
 
 ### `GET /api/inboxes`
 
@@ -794,7 +796,7 @@ Create an inbox manually (most inboxes are created automatically during the OAut
 | `display_name` | string | No | Sender display name |
 | `max_emails_per_day` | int | No | Daily sending limit (default `50`) |
 | `wait_minutes_between` | int | No | Cooldown between sends (default `5`) |
-| `provider` | string | No | `gmail` or `office365` |
+| `provider` | string | No | `gmail`, `office365`, or `smtp` (generic SMTP; configure credentials via `/api/smtp/inboxes/{id}`) |
 | `tracking_domain` | string | No | Custom tracking domain hostname |
 | `ramp_up_enabled` | bool | No | Enable send-volume warm-up ramp (default `false`) |
 | `ramp_up_period_days` | int | No | Ramp-up duration in days (default `42`) |
@@ -838,6 +840,30 @@ Pause an inbox. Choose how to handle leads currently assigned to it.
 Resume a paused inbox. Also un-pauses any `CampaignLead` rows that were paused because of this inbox, then triggers a full queue recalculation.
 
 **Response:** Updated inbox object.
+
+### SMTP inboxes (`/api/smtp`)
+
+Generic SMTP/IMAP inboxes (Amazon SES or any SMTP relay). Create the inbox first via `POST /api/inboxes` with `provider: "smtp"`, then store its credentials here. Passwords are never returned — responses carry `has_smtp_password` / `has_imap_password` booleans only. SMTP connections require STARTTLS or implicit SSL and verify TLS certificates; hosts resolving to private/internal addresses are rejected unless `SMTP_ALLOW_PRIVATE_HOSTS=true` is set.
+
+### `PUT /api/smtp/inboxes/{id}`
+
+Create or replace the SMTP/IMAP credentials for an SMTP inbox. On update, an empty password field means "keep the stored secret" (create requires one). Does not test the connection — call the test endpoint explicitly.
+
+**Body:** `smtp_host`, `smtp_port` (default `587`), `smtp_username`, `smtp_password`, `smtp_use_tls` (default `true`), `smtp_use_ssl` (default `false`), plus optional `imap_host`, `imap_port` (default `993`), `imap_username`, `imap_password`, `imap_use_ssl` (default `true`) for inbound reply sync.
+
+> **At rest:** `smtp_password` / `imap_password` are transparently encrypted with `QUICKLY_ENCRYPTION_KEY` (Fernet). Use the UI/API whenever possible. To update them directly in the database (headless setups, credential rotation), generate the ciphertext with `python scripts/encrypt_secret.py --key-from-db --inbox-id <id> --sql` — see [docs/INSTALL.md](INSTALL.md#updating-smtp-credentials-from-the-command-line).
+
+### `GET /api/smtp/inboxes/{id}`
+
+Fetch the stored SMTP/IMAP settings (no secrets) including the last connection-test result (`last_tested_at`, `last_test_ok`, `last_test_error`).
+
+### `POST /api/smtp/inboxes/{id}/test`
+
+Test the stored SMTP connection (and IMAP when configured), persist the result on the account, and return per-protocol `{ok, error, detail}`. Test errors are sanitised to short category messages; full detail goes to the server logs.
+
+### `DELETE /api/smtp/inboxes/{id}`
+
+Remove the SMTP credentials (the inbox row itself is kept for history).
 
 ---
 
@@ -1266,9 +1292,17 @@ Send an email via Gmail from the unibox.
 
 Server-Sent Events (SSE) stream for real-time unibox updates (new messages, sync status changes).
 
-### `POST /api/unibox/gmail/push`
+### `POST /api/unibox/gmail/push?token=<push-webhook-token>`
 
 Google Pub/Sub push notification endpoint. Called automatically by Gmail when new messages arrive.
+
+This route is intentionally **public** (Google cannot send your session cookie), so it authenticates the caller with a shared secret instead: the `token` query parameter must match `app_setting.gmail_push_webhook_token`. Configure the Pub/Sub push subscription with the full URL shown in **Settings → Gmail Sync**:
+
+```
+https://yourdomain.com/api/unibox/gmail/push?token=<Push Webhook Token from Settings → Gmail Sync>
+```
+
+A missing or wrong token returns `401 Unauthorized`. Existing push subscriptions must be updated to append the token after upgrading.
 
 ---
 
@@ -1649,6 +1683,8 @@ Email bodies support Jinja2-style template substitution:
 | `{{company}}` | `custom_data.company` |
 | `{{*}}` | Any key from lead's `custom_data` |
 | `{{unsubscribe_link}}` | Auto-generated one-click unsubscribe URL |
+
+Template variables are also rendered in the **inbox display name** (the `From:` name) for campaign sends — e.g. an inbox display name of `{{name}} at Acme` produces `Jane Doe at Acme`.
 
 Example: `Hi {{name}}, I noticed {{company}} is growing fast...`
 

@@ -98,6 +98,7 @@ def _campaign_to_response(
         track_opens=bool(getattr(campaign, 'track_opens', False)),
         track_clicks=bool(getattr(campaign, 'track_clicks', False)),
         add_unsubscribe_header=bool(getattr(campaign, 'add_unsubscribe_header', True)),
+        add_one_click_unsubscribe=bool(getattr(campaign, 'add_one_click_unsubscribe', True)),
         send_first_as_text=bool(getattr(campaign, 'send_first_as_text', False)),
         send_all_as_text=bool(getattr(campaign, 'send_all_as_text', False)),
         timezone=getattr(campaign, 'timezone', None),
@@ -295,6 +296,7 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         track_opens=data.track_opens,
         track_clicks=data.track_clicks,
         add_unsubscribe_header=data.add_unsubscribe_header,
+        add_one_click_unsubscribe=data.add_one_click_unsubscribe,
         send_first_as_text=data.send_first_as_text,
         send_all_as_text=data.send_all_as_text,
         timezone=data.timezone,
@@ -555,6 +557,8 @@ async def update_campaign(
         campaign.track_clicks = data.track_clicks
     if data.add_unsubscribe_header is not None:
         campaign.add_unsubscribe_header = data.add_unsubscribe_header
+    if data.add_one_click_unsubscribe is not None:
+        campaign.add_one_click_unsubscribe = data.add_one_click_unsubscribe
     if data.send_first_as_text is not None:
         campaign.send_first_as_text = data.send_first_as_text
     if data.send_all_as_text is not None:
@@ -631,6 +635,7 @@ async def duplicate_campaign(campaign_id: int, db: AsyncSession = Depends(get_db
         track_opens=original.track_opens,
         track_clicks=original.track_clicks,
         add_unsubscribe_header=original.add_unsubscribe_header,
+        add_one_click_unsubscribe=original.add_one_click_unsubscribe,
         send_first_as_text=original.send_first_as_text,
         send_all_as_text=original.send_all_as_text,
         match_lead_provider=original.match_lead_provider,
@@ -1683,6 +1688,17 @@ async def send_test_email(
         )
         gmail_account = ga_result.scalar_one_or_none()
 
+    # Get SMTP account if needed (otherwise send_email's SMTP branch
+    # returns SendFailure — "No SMTP credentials provided" — and the
+    # test email can never be sent from an SMTP inbox)
+    smtp_account = None
+    if getattr(inbox, "provider", "") == "smtp":
+        from app.models import SmtpAccount
+        sa_result = await db.execute(
+            select(SmtpAccount).where(SmtpAccount.inbox_id == inbox.id)
+        )
+        smtp_account = sa_result.scalar_one_or_none()
+
     from app.sender import send_email
 
     result = await asyncio.get_event_loop().run_in_executor(
@@ -1696,6 +1712,7 @@ async def send_test_email(
             is_html=send_is_html,
             provider=getattr(inbox, "provider", "resend") or "resend",
             gmail_account=gmail_account,
+            smtp_account=smtp_account,
         ),
     )
 

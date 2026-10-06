@@ -33,16 +33,15 @@ function scheduleReloadIfRestoreComplete(res) {
 }
 
 /**
- * Send the browser to the login page after an unrecoverable 401.
- *
- * No-op when we are already on /login: assigning the current URL to
- * location.href triggers a full document reload, so an unauthenticated
- * request fired from the login page would reload it, remount the app, fire
- * again, and loop forever.
+ * Redirect to /login on session expiry – but never when already there.
+ * Without the pathname guard, any authenticated poll mounted on the login
+ * page (e.g. NotificationsProvider) would 401 → redirect → full reload →
+ * re-mount → 401 … an infinite reload loop.
  */
-function redirectToLogin() {
-  if (window.location.pathname === '/login') return;
-  window.location.href = '/login';
+function _redirectToLoginIfNeeded() {
+  if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+    window.location.href = '/login';
+  }
 }
 
 async function _refreshAccessToken() {
@@ -59,6 +58,28 @@ async function _refreshAccessToken() {
     _refreshPromise = null;
   });
   return _refreshPromise;
+}
+
+async function _errorFromResponse(res) {
+  const text = await res.text();
+  let detail = text || res.statusText;
+  let retryAfter = null;
+  try {
+    const body = JSON.parse(text);
+    if (typeof body?.detail === 'string') {
+      detail = body.detail;
+    } else if (body?.detail && typeof body.detail === 'object') {
+      // FastAPI cooldown shape: {error, message, retry_after}
+      detail = body.detail.message || detail;
+      retryAfter = body.detail.retry_after ?? null;
+    }
+  } catch {
+    /* not JSON — keep the raw text */
+  }
+  const err = new Error(detail);
+  err.status = res.status;
+  if (retryAfter != null) err.retryAfter = retryAfter;
+  return err;
 }
 
 async function request(path, options = {}) {
@@ -81,26 +102,21 @@ async function request(path, options = {}) {
         : { ...options, headers: retryHeaders };
       const retryRes = await fetch(API_ROOT + path, retryOptions);
       if (!retryRes.ok) {
-        const text = await retryRes.text();
-        const err = new Error(text || retryRes.statusText);
-        err.status = retryRes.status;
-        throw err;
+        throw await _errorFromResponse(retryRes);
       }
       const retryData = await retryRes.json();
       scheduleReloadIfRestoreComplete(retryRes);
       if (method === 'GET') _memCache.set(path, retryData);
       return retryData;
     } catch {
-      // Refresh failed – redirect to login
-      redirectToLogin();
+      // Refresh failed – redirect to login (unless already there – see
+      // _redirectToLoginIfNeeded – otherwise the login page reload-loops).
+      _redirectToLoginIfNeeded();
       throw new Error('Session expired');
     }
   }
   if (!res.ok) {
-    const text = await res.text();
-    const err = new Error(text || res.statusText);
-    err.status = res.status;
-    throw err;
+    throw await _errorFromResponse(res);
   }
   const data = await res.json();
   scheduleReloadIfRestoreComplete(res);
@@ -121,23 +137,17 @@ async function downloadRequest(path) {
         cache: 'no-store',
       });
       if (!res.ok) {
-        const text = await res.text();
-        const err = new Error(text || res.statusText);
-        err.status = res.status;
-        throw err;
+        throw await _errorFromResponse(res);
       }
       return res;
     } catch (e) {
       if (e.status) throw e;
-      redirectToLogin();
+      _redirectToLoginIfNeeded();
       throw new Error('Session expired');
     }
   }
   if (!res.ok) {
-    const text = await res.text();
-    const err = new Error(text || res.statusText);
-    err.status = res.status;
-    throw err;
+    throw await _errorFromResponse(res);
   }
   return res;
 }
@@ -162,23 +172,17 @@ async function downloadPostRequest(path, data) {
         cache: 'no-store',
       });
       if (!res.ok) {
-        const text = await res.text();
-        const err = new Error(text || res.statusText);
-        err.status = res.status;
-        throw err;
+        throw await _errorFromResponse(res);
       }
       return res;
     } catch (e) {
       if (e.status) throw e;
-      redirectToLogin();
+      _redirectToLoginIfNeeded();
       throw new Error('Session expired');
     }
   }
   if (!res.ok) {
-    const text = await res.text();
-    const err = new Error(text || res.statusText);
-    err.status = res.status;
-    throw err;
+    throw await _errorFromResponse(res);
   }
   return res;
 }
@@ -205,22 +209,16 @@ export const api = {
           method: 'POST', body: form, headers: { Authorization: `Bearer ${newToken}` },
         });
         if (!retryRes.ok) {
-          const text = await retryRes.text();
-          const err = new Error(text || retryRes.statusText);
-          err.status = retryRes.status;
-          throw err;
+          throw await _errorFromResponse(retryRes);
         }
         return retryRes.json();
       } catch {
-        redirectToLogin();
+        _redirectToLoginIfNeeded();
         throw new Error('Session expired');
       }
     }
     if (!res.ok) {
-      const text = await res.text();
-      const err = new Error(text || res.statusText);
-      err.status = res.status;
-      throw err;
+      throw await _errorFromResponse(res);
     }
     return res.json();
   },
@@ -243,22 +241,16 @@ export const api = {
           headers: { Authorization: `Bearer ${newToken}` },
         });
         if (!retryRes.ok) {
-          const text = await retryRes.text();
-          const err = new Error(text || retryRes.statusText);
-          err.status = retryRes.status;
-          throw err;
+          throw await _errorFromResponse(retryRes);
         }
         return retryRes.json();
       } catch {
-        redirectToLogin();
+        _redirectToLoginIfNeeded();
         throw new Error('Session expired');
       }
     }
     if (!res.ok) {
-      const text = await res.text();
-      const err = new Error(text || res.statusText);
-      err.status = res.status;
-      throw err;
+      throw await _errorFromResponse(res);
     }
     return res.json();
   },
