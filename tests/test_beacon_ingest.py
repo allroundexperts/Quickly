@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -34,7 +35,7 @@ async def test_record_email_open_matches_beacon_payload(session, monkeypatch):
     campaign = await make_campaign(session)
     lead = await make_lead(session)
     await make_campaign_lead(session, campaign.id, lead.id)
-    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
+    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=datetime.utcnow() - timedelta(hours=1))
     token = email_log.open_token or str(email_log.id)
     await session.commit()
 
@@ -42,3 +43,19 @@ async def test_record_email_open_matches_beacon_payload(session, monkeypatch):
     assert recorded is True
     res = await session.execute(select(EmailOpen).where(EmailOpen.email_log_id == email_log.id))
     assert res.scalar_one_or_none() is not None
+
+
+@pytest.mark.asyncio
+async def test_record_email_open_without_user_agent_is_not_treated_as_bot(session, monkeypatch):
+    """Beacon events that don't forward a User-Agent (None) must still count."""
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
+
+    inbox = await make_inbox(session)
+    campaign = await make_campaign(session)
+    lead = await make_lead(session)
+    await make_campaign_lead(session, campaign.id, lead.id)
+    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=datetime.utcnow() - timedelta(hours=1))
+    await session.commit()
+
+    assert await record_email_open(session, email_log.open_token, "9.9.9.9", None) is True
+    assert await record_email_open(session, email_log.open_token, "9.9.9.9", "") is False

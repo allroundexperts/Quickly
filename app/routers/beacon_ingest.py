@@ -63,8 +63,13 @@ async def beacon_ingest(request: Request, db: AsyncSession = Depends(get_db)):
     if ip is not None and not isinstance(ip, str):
         raise HTTPException(422, "invalid ip_address")
 
+    # Optional: older Beacon builds do not forward it (None = unknown, not a bot).
+    user_agent = data.get("user_agent")
+    if user_agent is not None and not isinstance(user_agent, str):
+        raise HTTPException(422, "invalid user_agent")
+
     if kind == "open":
-        await record_email_open(db, path_token, ip)
+        await record_email_open(db, path_token, ip, user_agent)
         return {"ok": True}
 
     if kind == "click":
@@ -76,7 +81,7 @@ async def beacon_ingest(request: Request, db: AsyncSession = Depends(get_db)):
         if not link or link.original_url != original_url:
             log.warning("beacon click token/url mismatch token=%s", path_token[:8])
             return {"ok": True, "skipped": True}
-        await record_email_click(db, path_token, ip)
+        await record_email_click(db, path_token, ip, user_agent)
         return {"ok": True}
 
     await process_unsubscribe(db, path_token)

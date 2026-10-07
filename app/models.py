@@ -447,6 +447,7 @@ class EmailOpen(Base):
         nullable=False,
     )
     ip_address = Column(String(45), nullable=True)  # IPv4/IPv6
+    user_agent = Column(String(512), nullable=True)
     opened_at = Column(DateTime, default=_utcnow)
     email_log = relationship("EmailLog", back_populates="opens")
 
@@ -460,6 +461,7 @@ class EmailClick(Base):
         nullable=False,
     )
     ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(512), nullable=True)
     clicked_at = Column(DateTime, default=_utcnow)
     email_log = relationship("EmailLog", back_populates="clicks")
 
@@ -484,6 +486,9 @@ class TrackedLink(Base):
     token = Column(String(64), unique=True, nullable=False, index=True)
     original_url = Column(Text, nullable=False)
     created_at = Column(DateTime, default=_utcnow)
+    # Last time this link was hit (human or bot); used to spot scanners that
+    # open every link of an email at once.
+    last_hit_at = Column(DateTime, nullable=True)
 
     email_log = relationship("EmailLog", back_populates="tracked_links")
 

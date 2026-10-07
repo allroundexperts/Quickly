@@ -212,6 +212,10 @@ async def _run_migrations(conn) -> None:
         "ALTER TABLE smtp_account ADD COLUMN IF NOT EXISTS last_send_at TIMESTAMP WITHOUT TIME ZONE NULL",
         # 2026-09-22: per-campaign RFC 8058 one-click unsubscribe toggle
         "ALTER TABLE campaign ADD COLUMN IF NOT EXISTS add_one_click_unsubscribe BOOLEAN NOT NULL DEFAULT TRUE",
+        # 2026-10-08: bot filtering for open/click tracking
+        "ALTER TABLE email_open ADD COLUMN IF NOT EXISTS user_agent VARCHAR(512) NULL",
+        "ALTER TABLE email_click ADD COLUMN IF NOT EXISTS user_agent VARCHAR(512) NULL",
+        "ALTER TABLE tracked_link ADD COLUMN IF NOT EXISTS last_hit_at TIMESTAMP WITHOUT TIME ZONE NULL",
     ]
     # custom_email_override table (IF NOT EXISTS — must be a separate stmt
     # because it uses raw SQL, not ALTER TABLE)

@@ -7,7 +7,7 @@ to avoid real HTTP calls.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import select, func
@@ -30,14 +30,28 @@ from tests.conftest import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+_BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+)
+
+
+def _an_hour_ago() -> datetime:
+    """A sent_at old enough that opens/clicks aren't treated as delivery scans."""
+    return datetime.utcnow() - timedelta(hours=1)
+
+
 def _req(
     x_real_ip: str | None = None,
     x_forwarded_for: str | None = None,
     cf_connecting_ip: str | None = None,
     client_host: str | None = None,
+    user_agent: str | None = _BROWSER_UA,
 ):
     """Build a minimal fake Starlette Request-like object for the router functions."""
     raw_headers: dict[str, str] = {}
+    if user_agent is not None:
+        raw_headers["User-Agent"] = user_agent
     if x_real_ip:
         raw_headers["X-Real-IP"] = x_real_ip
     if x_forwarded_for:
@@ -94,7 +108,7 @@ async def test_open_pixel_records_email_open(session, monkeypatch):
     campaign = await make_campaign(session)
     lead = await make_lead(session)
     cl = await make_campaign_lead(session, campaign.id, lead.id)
-    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
+    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=_an_hour_ago())
 
     await open_pixel(token=email_log.open_token or str(email_log.id), request=_req(x_real_ip="1.2.3.4"), db=session)
 
@@ -112,7 +126,7 @@ async def test_open_pixel_stores_ip_address(session, monkeypatch):
     campaign = await make_campaign(session)
     lead = await make_lead(session)
     await make_campaign_lead(session, campaign.id, lead.id)
-    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
+    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=_an_hour_ago())
 
     await open_pixel(token=email_log.open_token or str(email_log.id), request=_req(x_real_ip="5.6.7.8"), db=session)
 
@@ -131,7 +145,7 @@ async def test_open_pixel_sets_opened_flag(session, monkeypatch):
     campaign = await make_campaign(session)
     lead = await make_lead(session)
     await make_campaign_lead(session, campaign.id, lead.id)
-    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
+    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=_an_hour_ago())
     assert not email_log.opened
 
     await open_pixel(token=email_log.open_token or str(email_log.id), request=_req(), db=session)
@@ -163,7 +177,7 @@ async def test_open_pixel_fires_webhook(session, monkeypatch):
     campaign = await make_campaign(session)
     lead = await make_lead(session)
     await make_campaign_lead(session, campaign.id, lead.id)
-    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
+    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=_an_hour_ago())
 
     await open_pixel(token=email_log.open_token or str(email_log.id), request=_req(), db=session)
 
@@ -178,7 +192,7 @@ async def test_open_pixel_prefers_cf_connecting_ip(session, monkeypatch):
     campaign = await make_campaign(session)
     lead = await make_lead(session)
     await make_campaign_lead(session, campaign.id, lead.id)
-    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
+    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=_an_hour_ago())
 
     await open_pixel(
         token=email_log.open_token or str(email_log.id),
@@ -213,7 +227,7 @@ async def test_click_redirect_redirects_to_original_url(session, monkeypatch):
     campaign = await make_campaign(session)
     lead = await make_lead(session)
     await make_campaign_lead(session, campaign.id, lead.id)
-    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
+    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=_an_hour_ago())
 
     tracked = TrackedLink(
         email_log_id=email_log.id,
@@ -237,7 +251,7 @@ async def test_click_redirect_records_email_click(session, monkeypatch):
     campaign = await make_campaign(session)
     lead = await make_lead(session)
     await make_campaign_lead(session, campaign.id, lead.id)
-    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
+    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=_an_hour_ago())
 
     tracked = TrackedLink(
         email_log_id=email_log.id,
@@ -264,7 +278,7 @@ async def test_click_redirect_prefers_cf_connecting_ip(session, monkeypatch):
     campaign = await make_campaign(session)
     lead = await make_lead(session)
     await make_campaign_lead(session, campaign.id, lead.id)
-    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
+    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=_an_hour_ago())
 
     tracked = TrackedLink(
         email_log_id=email_log.id,
@@ -295,7 +309,7 @@ async def test_click_redirect_sets_clicked_flag(session, monkeypatch):
     campaign = await make_campaign(session)
     lead = await make_lead(session)
     await make_campaign_lead(session, campaign.id, lead.id)
-    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
+    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=_an_hour_ago())
     assert not email_log.clicked
 
     tracked = TrackedLink(
@@ -325,7 +339,7 @@ async def test_click_redirect_fires_webhook(session, monkeypatch):
     campaign = await make_campaign(session)
     lead = await make_lead(session)
     await make_campaign_lead(session, campaign.id, lead.id)
-    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
+    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=_an_hour_ago())
 
     tracked = TrackedLink(
         email_log_id=email_log.id, token="wh-click-token",
@@ -532,3 +546,143 @@ async def test_tracking_probe_returns_ok():
     result = await tracking_probe()
 
     assert result == {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Bot filtering — opens and clicks
+# ---------------------------------------------------------------------------
+
+
+async def _tracked_email(session, sent_at: datetime | None = None, tokens=("bot-link-a",)):
+    inbox = await make_inbox(session)
+    campaign = await make_campaign(session)
+    lead = await make_lead(session)
+    await make_campaign_lead(session, campaign.id, lead.id)
+    email_log = await make_email_log(
+        session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=sent_at or _an_hour_ago()
+    )
+    for token in tokens:
+        session.add(TrackedLink(email_log_id=email_log.id, token=token, original_url=f"https://example.com/{token}"))
+    await session.flush()
+    return email_log
+
+
+async def _count(session, model, email_log_id: int) -> int:
+    res = await session.execute(select(func.count(model.id)).where(model.email_log_id == email_log_id))
+    return res.scalar()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ua", [
+    "",
+    "python-requests/2.31.0",
+    "Mozilla/5.0 (compatible; Barracuda Sentinel (EE))",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/120.0 Safari/537.36",
+])
+async def test_click_from_bot_user_agent_is_ignored_but_still_redirects(session, monkeypatch, ua):
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
+    email_log = await _tracked_email(session)
+
+    resp = await click_redirect(token="bot-link-a", request=_req(user_agent=ua), db=session)
+
+    assert resp.status_code == 302
+    assert await _count(session, EmailClick, email_log.id) == 0
+    await session.refresh(email_log)
+    assert email_log.clicked is False
+
+
+@pytest.mark.asyncio
+async def test_click_right_after_send_is_ignored(session, monkeypatch):
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
+    email_log = await _tracked_email(session, sent_at=datetime.utcnow() - timedelta(seconds=5))
+
+    await click_redirect(token="bot-link-a", request=_req(), db=session)
+
+    assert await _count(session, EmailClick, email_log.id) == 0
+
+
+@pytest.mark.asyncio
+async def test_click_burst_across_links_discards_all_burst_clicks(session, monkeypatch):
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
+    email_log = await _tracked_email(session, tokens=("burst-a", "burst-b"))
+
+    await click_redirect(token="burst-a", request=_req(), db=session)
+    assert await _count(session, EmailClick, email_log.id) == 1
+
+    await click_redirect(token="burst-b", request=_req(), db=session)
+
+    assert await _count(session, EmailClick, email_log.id) == 0
+    await session.refresh(email_log)
+    assert email_log.clicked is False
+
+
+@pytest.mark.asyncio
+async def test_repeat_click_on_same_link_is_not_a_burst(session, monkeypatch):
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
+    email_log = await _tracked_email(session, tokens=("same-a", "same-b"))
+
+    await click_redirect(token="same-a", request=_req(), db=session)
+    await click_redirect(token="same-a", request=_req(), db=session)
+
+    assert await _count(session, EmailClick, email_log.id) == 2
+
+
+@pytest.mark.asyncio
+async def test_click_on_second_link_later_is_not_a_burst(session, monkeypatch):
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
+    email_log = await _tracked_email(session, tokens=("late-a", "late-b"))
+
+    await click_redirect(token="late-a", request=_req(), db=session)
+    link_a = (await session.execute(select(TrackedLink).where(TrackedLink.token == "late-a"))).scalar_one()
+    link_a.last_hit_at = datetime.utcnow() - timedelta(minutes=1)
+    await session.flush()
+
+    await click_redirect(token="late-b", request=_req(), db=session)
+
+    assert await _count(session, EmailClick, email_log.id) == 2
+
+
+@pytest.mark.asyncio
+async def test_click_stores_user_agent(session, monkeypatch):
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
+    email_log = await _tracked_email(session)
+
+    await click_redirect(token="bot-link-a", request=_req(), db=session)
+
+    row = (await session.execute(select(EmailClick).where(EmailClick.email_log_id == email_log.id))).scalar_one()
+    assert row.user_agent == _BROWSER_UA
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ua", ["", "Mozilla/5.0", "curl/8.4.0"])
+async def test_open_from_bot_user_agent_is_ignored(session, monkeypatch, ua):
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
+    email_log = await _tracked_email(session)
+
+    resp = await open_pixel(token=email_log.open_token, request=_req(user_agent=ua), db=session)
+
+    assert resp.media_type == "image/gif"
+    assert await _count(session, EmailOpen, email_log.id) == 0
+    await session.refresh(email_log)
+    assert email_log.opened is False
+
+
+@pytest.mark.asyncio
+async def test_open_via_gmail_image_proxy_is_counted(session, monkeypatch):
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
+    email_log = await _tracked_email(session)
+    gmail_ua = "Mozilla/5.0 (Windows NT 5.1; rv:11.0) Gecko Firefox/11.0 (via ggpht.com GoogleImageProxy)"
+
+    await open_pixel(token=email_log.open_token, request=_req(user_agent=gmail_ua), db=session)
+
+    assert await _count(session, EmailOpen, email_log.id) == 1
+
+
+@pytest.mark.asyncio
+async def test_open_right_after_send_is_ignored(session, monkeypatch):
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
+    email_log = await _tracked_email(session, sent_at=datetime.utcnow() - timedelta(seconds=3))
+
+    await open_pixel(token=email_log.open_token, request=_req(), db=session)
+
+    assert await _count(session, EmailOpen, email_log.id) == 0

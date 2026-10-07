@@ -54,7 +54,7 @@ async def open_pixel(
     we fall back to an integer lookup when the token doesn't match.
     """
     ip = client_ip_from_request(request)
-    await record_email_open(db, token, ip)
+    await record_email_open(db, token, ip, request.headers.get("user-agent") or "")
     return Response(
         content=PIXEL_GIF,
         media_type="image/gif",
@@ -73,7 +73,7 @@ async def click_redirect(
     if not dest:
         return Response(status_code=404, content="Not found")
     ip = client_ip_from_request(request)
-    await record_email_click(db, token, ip)
+    await record_email_click(db, token, ip, request.headers.get("user-agent") or "")
     return RedirectResponse(url=dest, status_code=302)
 
 
