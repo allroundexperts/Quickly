@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +33,15 @@ class NotificationItem(BaseModel):
     inbox_id: Optional[int] = None
     read_at: Optional[datetime] = None
     created_at: datetime
+
+    @field_validator("read_at", "created_at")
+    @classmethod
+    def _assume_utc(cls, v: Optional[datetime]) -> Optional[datetime]:
+        # Stored as naive UTC; tag it so the JSON carries +00:00 and browsers
+        # don't parse it as local time (which skews "x ago" by the UTC offset).
+        if v is not None and v.tzinfo is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v
 
     class Config:
         from_attributes = True
