@@ -1,6 +1,6 @@
-# Model Context Protocol (MCP) — Quickly Leads
+# Model Context Protocol (MCP) — Quickly Leads & Campaigns
 
-Quickly exposes a **remote MCP server** over **Streamable HTTP** so AI clients (Cursor, Claude Desktop, etc.) can call lead-related tools without running a local Python MCP process. The server is part of the main FastAPI app and uses the same authentication as the REST API.
+Quickly exposes a **remote MCP server** over **Streamable HTTP** so AI clients (Cursor, Claude Desktop, etc.) can call lead and campaign tools without running a local Python MCP process. The server is part of the main FastAPI app and uses the same authentication as the REST API.
 
 ---
 
@@ -32,13 +32,68 @@ MCP requests are checked before the MCP session runs. Tool calls that proxy to `
 
 ## Tools
 
-| Tool | Purpose |
+Each tool proxies one REST endpoint, and the JSON responses are the same as those documented in [API.md](API.md). For update tools, a field you leave out stays as it is.
+
+### Leads
+
+| Tool | Endpoint |
 |------|--------|
-| `list_leads` | List leads (`q`, `status`, `bad_only`, `interest`) — same filters as `GET /api/leads`; all combine with AND when set |
+| `list_leads` | `GET /api/leads` (`q`, `status`, `bad_only`, `interest`; all combine with AND when set) |
 | `get_lead` | `GET /api/leads/{id}` |
 | `update_lead` | `PATCH /api/leads/{id}` (`name`, `enrollment_status`, `custom_data`) |
 | `delete_lead` | `DELETE /api/leads/{id}` |
-| `add_campaign_leads` | `POST /api/campaigns/{campaign_id}/leads` (bulk add / enroll) |
+
+### Campaigns
+
+| Tool | Endpoint |
+|------|--------|
+| `list_campaigns` | `GET /api/campaigns` |
+| `get_campaign` | `GET /api/campaigns/{id}` |
+| `campaigns_have_leads` | `GET /api/campaigns/has-leads` |
+| `create_campaign` | `POST /api/campaigns` (`name`, `inbox_ids`, plus any settings) |
+| `update_campaign` | `PATCH /api/campaigns/{id}` (settings: schedule, inboxes, tracking, unsubscribe, plain-text, timezone, `paused`, …) |
+| `delete_campaign` | `DELETE /api/campaigns/{id}` (also deletes leads enrolled only in this campaign) |
+| `duplicate_campaign` | `POST /api/campaigns/{id}/duplicate` |
+| `reorder_campaigns` | `POST /api/campaigns/reorder` |
+
+### Sequence steps and A/B variants
+
+| Tool | Endpoint |
+|------|--------|
+| `list_sequence_steps` | `GET /api/campaigns/{id}/sequences` |
+| `create_sequence_step` | `POST /api/campaigns/{id}/sequences` |
+| `update_sequence_step` | `PATCH /api/campaigns/{id}/sequences/{sequence_id}` |
+| `delete_sequence_step` | `DELETE /api/campaigns/{id}/sequences/{sequence_id}` |
+| `list_sequence_variants` | `GET …/sequences/{sequence_id}/variants` |
+| `create_sequence_variant` | `POST …/sequences/{sequence_id}/variants` |
+| `update_sequence_variant` | `PATCH …/sequences/{sequence_id}/variants/{variant_id}` |
+| `delete_sequence_variant` | `DELETE …/sequences/{sequence_id}/variants/{variant_id}` |
+| `preview_campaign_email` | `POST /api/campaigns/{id}/preview` |
+| `send_test_email` | `POST /api/campaigns/{id}/send-test` |
+
+### Campaign leads
+
+| Tool | Endpoint |
+|------|--------|
+| `list_campaign_leads` | `GET /api/campaigns/{id}/leads` |
+| `add_campaign_leads` | `POST /api/campaigns/{id}/leads` (bulk add / enroll) |
+| `import_campaign_leads_csv` | `POST /api/campaigns/{id}/leads/import` (pass the CSV as text in `csv_content`) |
+| `export_campaign_leads_csv` | `GET /api/campaigns/{id}/leads/export` (returns the CSV as text) |
+| `update_campaign_lead` | `PATCH /api/campaigns/{id}/leads/{lead_id}` (`status`, `interest`, `sending_paused`) |
+| `remove_campaign_lead` | `DELETE /api/campaigns/{id}/leads/{lead_id}` |
+| `write_custom_email` | `PATCH /api/campaigns/{id}/leads/{lead_id}/custom-email/{sequence_id}` |
+| `reconcile_personalized` | `POST /api/campaigns/{id}/reconcile-personalized` |
+| `verify_campaign_leads` | `POST /api/campaigns/{id}/leads/verify` |
+| `get_campaign_verification_status` | `GET /api/campaigns/{id}/leads/verification-status` |
+| `detect_campaign_lead_providers` | `POST /api/campaigns/{id}/leads/detect-providers` |
+
+### Campaign activity
+
+| Tool | Endpoint |
+|------|--------|
+| `list_campaign_queue` | `GET /api/campaigns/{id}/queue` |
+| `list_campaign_sent_emails` | `GET /api/campaigns/{id}/sent` |
+| `get_campaign_step_analytics` | `GET /api/campaigns/{id}/analytics/steps` |
 
 Standalone lead creation is not exposed as a separate MCP tool; use `add_campaign_leads` (same rules as the REST API).
 

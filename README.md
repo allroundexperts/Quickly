@@ -96,7 +96,7 @@ If this saves you money, please consider dropping a ⭐ — it helps others find
 
 * **Webhooks** — 15 real-time event types: `email.sent`, `email.opened`, `email.clicked`, `email.bounced`, `lead.replied`, `lead.interested`, `lead.unsubscribed`, `lead.status_changed`, and more
 * **REST API** — 90+ endpoints secured by JWT auth and API keys. Custom n8n node included
-* **MCP (Model Context Protocol)** — Remote Streamable HTTP server at `/api/mcp` for leads tools; connect with `mcp-remote` from Cursor or other clients ([docs/MCP.md](docs/MCP.md))
+* **MCP (Model Context Protocol)** — Remote Streamable HTTP server at `/api/mcp` for lead and campaign tools; connect with `mcp-remote` from Cursor or other clients ([docs/MCP.md](docs/MCP.md))
 * **Email verification** — Verify lead addresses before sending via any HTTP provider
 * **Test mode** — Simulate sends, opens, and clicks without delivering real emails
 * **Priority scheduling** — Drag campaigns to set priority; choose priority-first or round-robin strategies
@@ -223,7 +223,7 @@ See [`.env.example`](.env.example) for the full annotated reference.
 | Scheduling    | APScheduler (in-process, PostgreSQL job store)            |
 | Auth          | JWT HS256, bcrypt, HMAC API keys, Fernet token encryption |
 | Automation    | Custom n8n node (covers all API endpoints)                |
-| AI agent I/O  | MCP over HTTPS (`/api/mcp`) — leads tools via `mcp-remote` |
+| AI agent I/O  | MCP over HTTPS (`/api/mcp`) — lead and campaign tools via `mcp-remote` |
 
 ## Documentation
 

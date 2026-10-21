@@ -4,7 +4,7 @@ Quickly exposes a JSON REST API over HTTP. **All endpoints require authenticatio
 
 All request/response bodies use `Content-Type: application/json`.
 
-**MCP (Model Context Protocol):** Quickly also serves a **Streamable HTTP** MCP endpoint at **`GET/POST /api/mcp`** for AI agents (leads tools). It uses the same API key or Bearer authentication as the REST API. See **[docs/MCP.md](MCP.md)** for client setup (`mcp-remote`, Cursor) and tool list.
+**MCP (Model Context Protocol):** Quickly also serves a **Streamable HTTP** MCP endpoint at **`GET/POST /api/mcp`** for AI agents (lead and campaign tools). It uses the same API key or Bearer authentication as the REST API. See **[docs/MCP.md](MCP.md)** for client setup (`mcp-remote`, Cursor) and tool list.
 
 **n8n:** To drive this API from **self-hosted n8n** with a built-in node (resources, operations, credentials), see **[N8N.md](N8N.md)** and the **[n8n package README](../n8n-node/README.md)** for install and usage.
 
