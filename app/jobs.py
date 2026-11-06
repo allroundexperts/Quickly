@@ -42,7 +42,7 @@ from app.sender import send_email, render_body, get_lead_data, SendResult, SendF
 from app.webhooks import fire_webhook_event
 from app.app_settings import get_google_oauth_credentials, get_office365_oauth_credentials
 from app import time as time_provider
-from app.queue_logic import _parse_time, compute_effective_daily_limit
+from app.queue_logic import _parse_time, compute_effective_daily_limit, record_ramp_up_activity
 from app.campaign_lead_status import campaign_lead_may_receive_sends
 
 log = logging.getLogger(__name__)
@@ -962,6 +962,7 @@ async def run_send_job():
                 email_log_entry.thread_id = result.thread_id or prev_thread_id
                 await session.delete(slot)
                 await _update_enrollment_after_send(session, cl, campaign, sequence)
+                record_ramp_up_activity(inbox, today)
                 sent_this_inbox += 1
                 total_sent += 1
                 quota_remaining -= 1
@@ -1754,6 +1755,7 @@ async def send_slot_job(slot_id: int) -> None:
         email_log_entry.thread_id = result.thread_id or prev_thread_id
         await session.delete(slot)
         await _update_enrollment_after_send(session, cl, campaign, sequence)
+        record_ramp_up_activity(inbox, today)
 
         if inbox.provider not in ("office365", "smtp") and email_log_entry.thread_id:
             try:

@@ -712,6 +712,7 @@ export default function Inboxes() {
   const [editDomainVerified, setEditDomainVerified] = useState(false);
   const [beaconSetupUrl, setBeaconSetupUrl] = useState('');
   const [beaconConnecting, setBeaconConnecting] = useState(false);
+  const [warmupRestarting, setWarmupRestarting] = useState(false);
   const [dnsAutoVerifyTrigger, setDnsAutoVerifyTrigger] = useState(0);
   const [editTrackingMode, setEditTrackingMode] = useState('app');
   const [addTrackingMode, setAddTrackingMode] = useState('app');
@@ -1375,6 +1376,25 @@ export default function Inboxes() {
     }
   };
 
+  const restartWarmup = async () => {
+    if (!editing) return;
+    const ok = await confirm(
+      `Restart warm-up for ${editing.email}? Its daily limit drops back to ${editing.ramp_up_start ?? 1} and climbs again from there.`,
+    );
+    if (!ok) return;
+    setWarmupRestarting(true);
+    setEditMsg(null);
+    try {
+      await api.post(`/inboxes/${editing.id}/ramp-up/restart`);
+      setEditMsg({ type: 'success', text: 'Warm-up restarted.' });
+      await refreshEditingInbox(editing.id);
+    } catch (err) {
+      setEditMsg({ type: 'error', text: err.message });
+    } finally {
+      setWarmupRestarting(false);
+    }
+  };
+
   const reuseDnsFromSibling = (domain) => {
     if (!editing || editing.beacon_connected) return;
     const d = (domain || '').trim();
@@ -1912,6 +1932,17 @@ export default function Inboxes() {
                               </p>
                             </div>
                           )}
+                          <div>
+                            <button
+                              type="button"
+                              className="text-xs text-blue-700 hover:underline disabled:text-gray-400 disabled:no-underline"
+                              onClick={restartWarmup}
+                              disabled={warmupRestarting || editDirty}
+                              title={editDirty ? 'Save or discard your changes first' : undefined}
+                            >
+                              {warmupRestarting ? 'Restarting…' : 'Restart warm-up'}
+                            </button>
+                          </div>
                         </div>
                       </div>
                       <div className="flex gap-2 pt-1">

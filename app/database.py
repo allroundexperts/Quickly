@@ -99,6 +99,9 @@ async def _run_migrations(conn) -> None:
         "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS ramp_up_step_size INTEGER NOT NULL DEFAULT 1",
         # 2026-05-21: track when ramp-up was paused (for freezing warm-up)
         "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS ramp_up_paused_at TIMESTAMP WITHOUT TIME ZONE NULL",
+        # 2026-11-07: warm-up advances only on days the inbox actually sent
+        "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS ramp_up_active_days INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS ramp_up_last_active_date DATE NULL",
         # 2026-05-22: personalized sequence fallbacks
         "ALTER TABLE sequence ADD COLUMN IF NOT EXISTS fallback_subject VARCHAR(512)",
         "ALTER TABLE sequence ADD COLUMN IF NOT EXISTS fallback_body TEXT",
@@ -251,6 +254,40 @@ async def _run_migrations(conn) -> None:
             "CREATE TABLE IF NOT EXISTS _app_schema_migrations (id VARCHAR(128) PRIMARY KEY)"
         )
     )
+
+    # Seed warm-up progress from send history so in-flight ramp-ups keep the
+    # days they actually sent instead of restarting from ramp_up_start.
+    once = await conn.execute(
+        text(
+            """
+            INSERT INTO _app_schema_migrations (id)
+            VALUES ('20261107_backfill_ramp_up_active_days')
+            ON CONFLICT (id) DO NOTHING
+            RETURNING id
+            """
+        )
+    )
+    if once.fetchone() is not None:
+        await conn.execute(
+            text(
+                """
+                UPDATE inbox AS i
+                SET ramp_up_active_days = s.days,
+                    ramp_up_last_active_date = s.last_day
+                FROM (
+                    SELECT e.inbox_id,
+                           COUNT(DISTINCT DATE(e.sent_at)) AS days,
+                           MAX(DATE(e.sent_at)) AS last_day
+                    FROM email_log AS e
+                    JOIN inbox AS i2 ON i2.id = e.inbox_id
+                    WHERE e.sent_at >= COALESCE(i2.ramp_up_started_at, i2.created_at)
+                    GROUP BY e.inbox_id
+                ) AS s
+                WHERE i.id = s.inbox_id
+                  AND i.ramp_up_enabled
+                """
+            )
+        )
 
     # Backfill enrollment from legacy lead.status + interest.
     # Sync from lead.status must run once only: enrollment is authoritative afterward; API updates cl only.

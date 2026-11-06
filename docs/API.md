@@ -841,6 +841,12 @@ Resume a paused inbox. Also un-pauses any `CampaignLead` rows that were paused b
 
 **Response:** Updated inbox object.
 
+### `POST /api/inboxes/{id}/ramp-up/restart`
+
+Restart the inbox's warm-up from `ramp_up_start`, enabling warm-up if it was off or already complete. Warm-up only advances on days the inbox actually sends. Triggers a full queue recalculation.
+
+**Response:** Updated inbox object.
+
 ### SMTP inboxes (`/api/smtp`)
 
 Generic SMTP/IMAP inboxes (Amazon SES or any SMTP relay). Create the inbox first via `POST /api/inboxes` with `provider: "smtp"`, then store its credentials here. Passwords are never returned — responses carry `has_smtp_password` / `has_imap_password` booleans only. SMTP connections require STARTTLS or implicit SSL and verify TLS certificates; hosts resolving to private/internal addresses are rejected unless `SMTP_ALLOW_PRIVATE_HOSTS=true` is set.

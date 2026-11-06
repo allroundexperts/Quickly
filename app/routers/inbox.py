@@ -27,7 +27,7 @@ from app.schemas import (
     InboxResponse,
     PauseInboxRequest,
 )
-from app.queue_logic import compute_effective_daily_limit
+from app.queue_logic import compute_effective_daily_limit, reset_ramp_up_progress
 from app.settings_manager import settings as app_settings
 from app.time import utcnow
 
@@ -332,7 +332,7 @@ async def update_inbox(
         inbox.ramp_up_enabled = data.ramp_up_enabled
         # Only reset the ramp-up clock when turning it on (not on every save while enabled)
         if data.ramp_up_enabled and not was_enabled:
-            inbox.ramp_up_started_at = datetime.utcnow()
+            reset_ramp_up_progress(inbox)
     if data.ramp_up_period_days is not None:
         if data.ramp_up_period_days != inbox.ramp_up_period_days:
             capacity_changed = True
@@ -342,14 +342,14 @@ async def update_inbox(
             capacity_changed = True
             # Reset the clock when the starting number changes
             if inbox.ramp_up_enabled:
-                inbox.ramp_up_started_at = datetime.utcnow()
+                reset_ramp_up_progress(inbox)
         inbox.ramp_up_start = data.ramp_up_start
     if data.ramp_up_step_size is not None:
         if data.ramp_up_step_size != inbox.ramp_up_step_size:
             capacity_changed = True
             # Reset the clock when the step size changes
             if inbox.ramp_up_enabled:
-                inbox.ramp_up_started_at = datetime.utcnow()
+                reset_ramp_up_progress(inbox)
         inbox.ramp_up_step_size = data.ramp_up_step_size
     if data.paused is not None:
         if data.paused and not inbox.paused:
@@ -386,6 +386,28 @@ async def update_inbox(
     inbox.effective_max_per_day = _compute_effective_limit(inbox)
     await _maybe_complete_ramp_up(inbox, db)
     await db.commit()
+    return inbox
+
+
+@router.post("/{inbox_id}/ramp-up/restart", response_model=InboxResponse)
+async def restart_ramp_up(
+    inbox_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Restart warm-up from ``ramp_up_start``, enabling it if it was off or complete."""
+    result = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
+    inbox = result.scalar_one_or_none()
+    if not inbox:
+        raise HTTPException(404, "Inbox not found")
+    inbox.ramp_up_enabled = True
+    reset_ramp_up_progress(inbox)
+    await db.commit()
+    from app.routers.schedule import enqueue_global_recalculate
+
+    enqueue_global_recalculate(background_tasks)
+    await db.refresh(inbox)
+    inbox.effective_max_per_day = _compute_effective_limit(inbox)
     return inbox
 
 

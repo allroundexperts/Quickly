@@ -20,37 +20,47 @@ log = logging.getLogger("quickly.queue")
 def compute_effective_daily_limit(inbox, for_date: Optional[date] = None) -> int:
     """Return the effective daily send limit for an inbox on a given date.
 
-    When ramp-up is enabled the inbox starts at ramp_up_start emails on the
-    day ramp-up was enabled and gains ramp_up_step_size additional slots per
-    calendar day until it reaches max_emails_per_day.  The reference date is
-    ramp_up_started_at (set when the user enables ramp-up) so that old inboxes
-    always start from the correct baseline regardless of when the inbox was
-    first created.
+    When ramp-up is enabled the inbox starts at ramp_up_start emails and gains
+    ramp_up_step_size additional slots for every day on which it actually
+    sent, until it reaches max_emails_per_day.  Days without sends (no active
+    campaign, inbox paused, nothing due) do not advance the warm-up; progress
+    is tracked by record_ramp_up_activity().
 
-    When the inbox is paused and ramp_up_paused_at is set, the warm-up
-    progression freezes: the effective date is clamped to the pause date so
-    that further calendar days do not advance the limit.
+    For future dates (queue projections) the inbox is assumed to send every
+    day from today onwards, unless it is paused.
     """
     if isinstance(inbox, int):
         return inbox
     if not getattr(inbox, "ramp_up_enabled", False):
         return inbox.max_emails_per_day
-    ref = for_date or datetime.utcnow().date()
-    # Freeze at the pause date when the inbox is paused
-    paused = getattr(inbox, "paused", False)
-    paused_at = getattr(inbox, "ramp_up_paused_at", None)
-    if paused and paused_at is not None:
-        ref = paused_at.date() if isinstance(paused_at, datetime) else paused_at
-    # Use ramp_up_started_at when available, fall back to created_at
-    started_at = getattr(inbox, "ramp_up_started_at", None)
-    if started_at is not None:
-        started = started_at.date() if isinstance(started_at, datetime) else started_at
-    else:
-        started = inbox.created_at.date() if isinstance(inbox.created_at, datetime) else inbox.created_at
-    days_since_start = max(0, (ref - started).days)
+    today = time_provider.now().date()
+    ref = for_date or today
+    active_days = getattr(inbox, "ramp_up_active_days", 0) or 0
+    last_active = getattr(inbox, "ramp_up_last_active_date", None)
+    # Today only counts towards the limit once it is over
+    days_completed = active_days - (1 if last_active == today else 0)
+    if ref > today and not getattr(inbox, "paused", False):
+        days_completed += (ref - today).days
     start = max(1, getattr(inbox, "ramp_up_start", 1))
     step = max(1, getattr(inbox, "ramp_up_step_size", 1))
-    return min(days_since_start * step + start, inbox.max_emails_per_day)
+    return min(max(0, days_completed) * step + start, inbox.max_emails_per_day)
+
+
+def record_ramp_up_activity(inbox, sent_on: date) -> None:
+    """Count *sent_on* as a warm-up day for the inbox (at most once per day)."""
+    if not getattr(inbox, "ramp_up_enabled", False):
+        return
+    if inbox.ramp_up_last_active_date == sent_on:
+        return
+    inbox.ramp_up_active_days = (inbox.ramp_up_active_days or 0) + 1
+    inbox.ramp_up_last_active_date = sent_on
+
+
+def reset_ramp_up_progress(inbox) -> None:
+    """Restart warm-up from ramp_up_start."""
+    inbox.ramp_up_started_at = datetime.utcnow()
+    inbox.ramp_up_active_days = 0
+    inbox.ramp_up_last_active_date = None
 
 
 def _parse_time(s: str) -> time:

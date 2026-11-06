@@ -9,7 +9,7 @@
 
 import io
 import pytest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 from fastapi import BackgroundTasks
 
@@ -46,12 +46,14 @@ from tests.conftest import (
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _inbox_with_age(days: int, max_per_day: int = 30, ramp_up: bool = True):
-    """Build a lightweight namespace mimicking an Inbox for unit-testing _compute_effective_limit."""
+    """Build a lightweight namespace mimicking an Inbox that has sent on *days* past days."""
     from types import SimpleNamespace
     return SimpleNamespace(
         max_emails_per_day=max_per_day,
         ramp_up_enabled=ramp_up,
         ramp_up_period_days=42,
+        ramp_up_active_days=days,
+        ramp_up_last_active_date=None,
         created_at=datetime.utcnow() - timedelta(days=days),
     )
 
@@ -91,6 +93,53 @@ def test_ramp_up_disabled_returns_full_limit():
     assert inbox_router._compute_effective_limit(inbox) == 50
 
 
+def test_ramp_up_does_not_advance_on_idle_days():
+    """Calendar days without sends (e.g. no active campaign) must not raise the limit."""
+    inbox = _inbox_with_age(0)
+    inbox.ramp_up_started_at = datetime.utcnow() - timedelta(days=30)
+    inbox.created_at = datetime.utcnow() - timedelta(days=30)
+    assert inbox_router._compute_effective_limit(inbox) == 1
+
+
+def test_record_ramp_up_activity_counts_each_day_once():
+    from app.queue_logic import record_ramp_up_activity
+    inbox = _inbox_with_age(0)
+    today = date.today()
+    record_ramp_up_activity(inbox, today)
+    record_ramp_up_activity(inbox, today)
+    assert inbox.ramp_up_active_days == 1
+    record_ramp_up_activity(inbox, today + timedelta(days=1))
+    assert inbox.ramp_up_active_days == 2
+
+
+def test_record_ramp_up_activity_ignored_when_disabled():
+    from app.queue_logic import record_ramp_up_activity
+    inbox = _inbox_with_age(0, ramp_up=False)
+    record_ramp_up_activity(inbox, date.today())
+    assert inbox.ramp_up_active_days == 0
+
+
+def test_ramp_up_sending_today_raises_tomorrow_not_today():
+    from app import time as time_provider
+    from app.queue_logic import compute_effective_daily_limit, record_ramp_up_activity
+    inbox = _inbox_with_age(2, max_per_day=50)
+    today = time_provider.now().date()
+    assert compute_effective_daily_limit(inbox) == 3
+    record_ramp_up_activity(inbox, today)
+    assert compute_effective_daily_limit(inbox) == 3
+    assert compute_effective_daily_limit(inbox, today + timedelta(days=1)) == 4
+
+
+def test_ramp_up_projects_future_days_unless_paused():
+    from app import time as time_provider
+    from app.queue_logic import compute_effective_daily_limit
+    inbox = _inbox_with_age(2, max_per_day=50)
+    in_three_days = time_provider.now().date() + timedelta(days=3)
+    assert compute_effective_daily_limit(inbox, in_three_days) == 6
+    inbox.paused = True
+    assert compute_effective_daily_limit(inbox, in_three_days) == 3
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Ramp-up: auto-disable once max is reached
 # ══════════════════════════════════════════════════════════════════════════════
@@ -102,7 +151,7 @@ async def test_auto_disable_ramp_up_when_complete(session):
         email="rampup@test.com",
         max_emails_per_day=3,
         ramp_up_enabled=True,
-        created_at=datetime.utcnow() - timedelta(days=5),  # 5 days old → effective=6 > max=3
+        ramp_up_active_days=5,  # 5 sending days → effective=6 > max=3
     )
     session.add(inbox)
     await session.flush()
@@ -136,7 +185,7 @@ async def test_list_inboxes_auto_disables_complete_ramp(session):
         email="ramplist@test.com",
         max_emails_per_day=2,
         ramp_up_enabled=True,
-        created_at=datetime.utcnow() - timedelta(days=10),  # day 10 → effective=11 > max=2
+        ramp_up_active_days=10,  # 10 sending days → effective=11 > max=2
     )
     session.add(inbox)
     await session.flush()
@@ -184,6 +233,27 @@ async def test_update_inbox_disables_ramp_up(session):
     )
     assert result.ramp_up_enabled is False
     assert result.effective_max_per_day == 20
+
+
+@pytest.mark.asyncio
+async def test_restart_ramp_up_resets_progress_and_enables(session):
+    inbox = Inbox(
+        email="restartramp@test.com",
+        max_emails_per_day=20,
+        ramp_up_enabled=False,
+        ramp_up_start=2,
+        ramp_up_active_days=30,
+        ramp_up_last_active_date=date.today(),
+    )
+    session.add(inbox)
+    await session.flush()
+
+    result = await inbox_router.restart_ramp_up(inbox.id, BackgroundTasks(), db=session)
+
+    assert result.ramp_up_enabled is True
+    assert result.ramp_up_active_days == 0
+    assert result.ramp_up_last_active_date is None
+    assert result.effective_max_per_day == 2
 
 
 @pytest.mark.asyncio

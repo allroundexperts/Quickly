@@ -109,6 +109,23 @@ async def _call(ctx: Context, method: str, path: str, **kwargs: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Inboxes
+# ---------------------------------------------------------------------------
+
+
+@leads_mcp.tool()
+async def list_inboxes(ctx: Context) -> str:
+    """List sending inboxes with their daily limits, warm-up settings and today's effective limit."""
+    return await _call(ctx, "GET", "/api/inboxes")
+
+
+@leads_mcp.tool()
+async def restart_inbox_warmup(ctx: Context, inbox_id: int) -> str:
+    """Restart an inbox's warm-up from its starting emails per day (enables warm-up if it was off or complete)."""
+    return await _call(ctx, "POST", f"/api/inboxes/{inbox_id}/ramp-up/restart")
+
+
+# ---------------------------------------------------------------------------
 # Leads
 # ---------------------------------------------------------------------------
 

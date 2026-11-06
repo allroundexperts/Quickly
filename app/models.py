@@ -11,6 +11,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     Column,
+    Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -120,6 +121,8 @@ class Inbox(Base):
     ramp_up_started_at = Column(DateTime, nullable=True, default=None)  # when ramp-up was (last) enabled
     paused = Column(Boolean, default=False, nullable=False)
     ramp_up_paused_at = Column(DateTime, nullable=True, default=None)  # when ramp-up was paused (for freezing warm-up)
+    ramp_up_active_days = Column(Integer, default=0, nullable=False)  # days the inbox actually sent during warm-up
+    ramp_up_last_active_date = Column(Date, nullable=True, default=None)  # last day counted in ramp_up_active_days
     campaign_inboxes = relationship("CampaignInbox", back_populates="inbox")
     gmail_account = relationship("GmailAccount", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
     gmail_sync_state = relationship("GmailSyncState", uselist=False, cascade="all, delete-orphan")

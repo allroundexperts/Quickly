@@ -158,6 +158,7 @@ class InboxResponse(BaseModel):
     ramp_up_started_at: Optional[datetime] = None
     paused: bool = False
     ramp_up_paused_at: Optional[datetime] = None
+    ramp_up_active_days: int = 0
     effective_max_per_day: int = 0  # computed; 0 means use max_emails_per_day directly
     # how many emails have been sent from this inbox **today** (UTC)
     sent_today: int = 0

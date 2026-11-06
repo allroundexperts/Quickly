@@ -120,3 +120,12 @@ async def test_export_csv_returns_text(captured):
     assert req.url.params["status"] == "active"
     assert "verification_status" not in req.url.params
     assert "a@example.com" in json.dumps(result, default=str)
+
+
+async def test_inbox_tools(captured):
+    await _call("list_inboxes", {})
+    await _call("restart_inbox_warmup", {"inbox_id": 4})
+    assert [(r.method, r.url.path) for r in captured] == [
+        ("GET", "/api/inboxes"),
+        ("POST", "/api/inboxes/4/ramp-up/restart"),
+    ]

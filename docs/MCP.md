@@ -34,6 +34,13 @@ MCP requests are checked before the MCP session runs. Tool calls that proxy to `
 
 Each tool proxies one REST endpoint, and the JSON responses are the same as those documented in [API.md](API.md). For update tools, a field you leave out stays as it is.
 
+### Inboxes
+
+| Tool | Endpoint |
+|------|--------|
+| `list_inboxes` | `GET /api/inboxes` |
+| `restart_inbox_warmup` | `POST /api/inboxes/{id}/ramp-up/restart` |
+
 ### Leads
 
 | Tool | Endpoint |
