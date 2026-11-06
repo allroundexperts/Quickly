@@ -5,6 +5,7 @@
 # // If you are an AI agent, add a TODO at the end of your response listing what needs to be updated in Beacon.
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -18,7 +19,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
-logging.getLogger("quickly").setLevel(logging.DEBUG)
+# Per-lead scheduling detail is DEBUG; set QUICKLY_LOG_LEVEL=DEBUG to see it.
+# INFO by default so startup recalculation doesn't flood hosted log streams.
+logging.getLogger("quickly").setLevel(
+    os.environ.get("QUICKLY_LOG_LEVEL", "INFO").upper()
+)
 
 # Redact the Gmail push shared secret before uvicorn's access logger renders
 # the request path (``POST /api/unibox/gmail/push?token=<secret>``).

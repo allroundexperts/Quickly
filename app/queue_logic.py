@@ -343,7 +343,7 @@ async def _get_preferred_inbox_for_lead(
     )
     inbox_id = result.scalar_one_or_none()
     if inbox_id and inbox_id in available_inbox_ids:
-        log.info("Inbox persistence (from EmailLog): lead %s -> inbox %s", lead_id, inbox_id)
+        log.debug("Inbox persistence (from EmailLog): lead %s -> inbox %s", lead_id, inbox_id)
         return inbox_id
     
     # If no sent emails, check existing QueueSlot records
@@ -367,7 +367,7 @@ async def _get_preferred_inbox_for_lead(
         )
         inbox_id = slot_result.scalar_one_or_none()
         if inbox_id and inbox_id in available_inbox_ids:
-            log.info("Inbox persistence (from QueueSlot): lead %s -> inbox %s", lead_id, inbox_id)
+            log.debug("Inbox persistence (from QueueSlot): lead %s -> inbox %s", lead_id, inbox_id)
             return inbox_id
     
     return None
@@ -493,7 +493,7 @@ async def reserve_slots_for_lead(
         if i > last_sent_sequence_index
     ]
     if not to_schedule:
-        log.info("reserve_slots_for_lead: nothing to schedule (all already sent) cl=%s", campaign_lead_id)
+        log.debug("reserve_slots_for_lead: nothing to schedule (all already sent) cl=%s", campaign_lead_id)
         return
 
     # Check for inbox persistence
@@ -511,7 +511,7 @@ async def reserve_slots_for_lead(
     locked_inbox_id = preferred_inbox_id
     if locked_inbox_id:
         inboxes = [inbox for inbox in inboxes if inbox[0] == locked_inbox_id]
-        log.info("Using inbox persistence: lead %s locked to inbox %s", lead_id, locked_inbox_id)
+        log.debug("Using inbox persistence: lead %s locked to inbox %s", lead_id, locked_inbox_id)
 
     # Use campaign-local time for scheduling so that campaigns configured in
     # a non-UTC timezone (e.g. Africa/Cairo) schedule their first email at the
@@ -527,7 +527,7 @@ async def reserve_slots_for_lead(
     scheduled_dates: List[date] = []
     round_robin = campaign_lead_id % len(inboxes) if inboxes else 0
 
-    log.info(
+    log.debug(
         "reserve_slots_for_lead: cl=%s campaign=%s tz=%s inboxes=%s sequences=%d start=%s last_sent=%d",
         campaign_lead_id, campaign.id, getattr(campaign, 'timezone', None) or 'server-local',
         [i[0] for i in inboxes], len(to_schedule), start_date, last_sent_sequence_index,
@@ -648,7 +648,7 @@ async def reserve_slots_for_lead(
                 if locked_inbox_id is None:
                     # First successful assignment defines the lead's inbox for all future slots.
                     locked_inbox_id = inbox_id
-                    log.info("Locked lead %s to inbox %s", lead_id, locked_inbox_id)
+                    log.debug("Locked lead %s to inbox %s", lead_id, locked_inbox_id)
                 # Get wait_minutes for this specific inbox
                 wait_min = next(i[2] for i in inboxes if i[0] == inbox_id)
                 pos = await next_available_slot_position(session, inbox_id, current_date, cache)
@@ -693,7 +693,7 @@ async def reserve_slots_for_lead(
                             # If chaining pushed us past the sending window, move to
                             # the next business day just like the overflow cases below.
                             if base_local_dt > end_boundary:
-                                log.info(
+                                log.debug(
                                     "  -> seq=%d: chained base %s past window end %s; moving to next day",
                                     idx, base_local_dt.strftime("%H:%M:%S"), end_time.strftime("%H:%M"),
                                 )
@@ -708,7 +708,7 @@ async def reserve_slots_for_lead(
                             scheduled_dt = _to_utc_naive(jittered_local_dt, campaign)
                             # Conflict detection uses the grid minute, not the chained/jittered minute.
                             local_send_minutes = next_dt.hour * 60 + next_dt.minute
-                            log.info(
+                            log.debug(
                                 "  -> using next slot today for seq=%d: grid=%s base=%s campaign-local (now %s)",
                                 idx, next_dt.strftime("%H:%M"), base_local_dt.strftime("%H:%M:%S"), now.strftime("%H:%M"),
                             )
@@ -716,7 +716,7 @@ async def reserve_slots_for_lead(
                             # No slot left today (window ended or every grid point is taken).
                             # Move to the next business day for ALL sequence types — stacking
                             # emails at end_time violates the inbox rate-limit and causes a pile-up.
-                            log.info(
+                            log.debug(
                                 "  -> no slot left today for seq=%d (window ended/full); moving to next day",
                                 idx,
                             )
@@ -751,7 +751,7 @@ async def reserve_slots_for_lead(
                         else datetime.combine(current_date, est_t)
                     )
                     if base_local_dt.time() > end_time:
-                        log.info(
+                        log.debug(
                             "  -> seq=%d pos=%d base would send at %s (past %s); moving to next day",
                             idx, pos, base_local_dt.strftime("%H:%M"), end_time.strftime("%H:%M"),
                         )
@@ -814,7 +814,7 @@ async def reserve_slots_for_lead(
                 campaign_lead_id, idx, current_date,
             )
 
-    log.info("reserve_slots_for_lead: done, created %d slots", len(scheduled_dates))
+    log.debug("reserve_slots_for_lead: done, created %d slots", len(scheduled_dates))
 
 
 def _filter_inboxes_for_lead_provider(
