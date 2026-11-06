@@ -1848,6 +1848,8 @@ function SettingsTab({ campaign, inboxes, onSave, campaignId }) {
 
   const toggleDay   = d  => setForm(f => { const s=new Set(f.sending_days); s.has(d)?s.delete(d):s.add(d); return {...f, sending_days:[...s].sort()}; });
   const toggleInbox = id => setForm(f => { const s=new Set(f.inbox_ids);   s.has(id)?s.delete(id):s.add(id); return {...f, inbox_ids:[...s]}; });
+  const allInboxesSelected = inboxes.length > 0 && inboxes.every(i => form.inbox_ids.includes(i.id));
+  const toggleAllInboxes = () => setForm(f => ({ ...f, inbox_ids: allInboxesSelected ? [] : inboxes.map(i => i.id) }));
 
   const submit = async e => {
     e.preventDefault();
@@ -1954,7 +1956,18 @@ function SettingsTab({ campaign, inboxes, onSave, campaignId }) {
 
         {/* Inboxes */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Sending inboxes *</label>
+          <div className="flex items-center justify-between mb-1">
+            <label className="block text-sm font-medium text-gray-700">Sending inboxes *</label>
+            {inboxes.length > 0 && (
+              <button
+                type="button"
+                className="text-xs text-teal-600 hover:underline"
+                onClick={toggleAllInboxes}
+              >
+                {allInboxesSelected ? 'Unselect all' : 'Select all'}
+              </button>
+            )}
+          </div>
           <div className="border rounded-lg p-3 max-h-48 overflow-y-auto space-y-1.5">
             {inboxes.length === 0 && <p className="text-sm text-gray-400">No inboxes configured.</p>}
             {inboxes.map(i => (
