@@ -19,7 +19,7 @@ from email.message import EmailMessage
 import email.policy
 from typing import Any
 
-from sqlalchemy import select, func
+from sqlalchemy import delete, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import EmailNotificationConfig, Inbox, Notification, User
@@ -451,3 +451,54 @@ async def dispatch_notification(
                 await db.flush()
     except Exception:
         log.exception("Unexpected error in dispatch_notification")
+
+
+# ---------------------------------------------------------------------------
+# Retention
+# ---------------------------------------------------------------------------
+
+_PURGE_BATCH_SIZE = 5000
+
+
+async def purge_old_notifications(
+    db: AsyncSession, retention_days: int | None = None
+) -> int:
+    """Delete in-app notifications older than *retention_days* (read or not).
+
+    Deletes in batches, committing between them, so a large backlog does not
+    hold a long lock or produce one huge transaction.  Returns the number of
+    rows deleted.  ``retention_days <= 0`` disables the purge.
+    """
+    days = settings.notification_retention_days if retention_days is None else retention_days
+    if days <= 0:
+        return 0
+    cutoff = time_provider.utcnow() - timedelta(days=days)
+    total = 0
+    while True:
+        ids = (
+            select(Notification.id)
+            .where(Notification.created_at < cutoff)
+            .limit(_PURGE_BATCH_SIZE)
+            .scalar_subquery()
+        )
+        result = await db.execute(delete(Notification).where(Notification.id.in_(ids)))
+        await db.commit()
+        deleted = result.rowcount or 0
+        total += deleted
+        if deleted < _PURGE_BATCH_SIZE:
+            break
+    if total:
+        log.info("Purged %d notification(s) older than %d day(s)", total, days)
+    return total
+
+
+async def run_notification_retention_job() -> None:
+    """Scheduler entry point: purge old notifications in a fresh session."""
+    from app.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        try:
+            await purge_old_notifications(db)
+        except Exception:
+            await db.rollback()
+            log.exception("Notification retention job failed")

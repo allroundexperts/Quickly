@@ -130,6 +130,38 @@ def test_ramp_up_sending_today_raises_tomorrow_not_today():
     assert compute_effective_daily_limit(inbox, today + timedelta(days=1)) == 4
 
 
+def test_ramp_up_projection_skips_non_sending_days():
+    """A Mon–Fri campaign planned on Friday must not count the weekend for Monday.
+
+    Counting Sat/Sun over-booked Monday beyond the real warm-up cap, so the
+    extra slots could never send and the daily-limit warning repeated forever.
+    """
+    from unittest.mock import patch
+    from app.queue_logic import compute_effective_daily_limit
+    friday = date(2026, 11, 13)
+    monday = friday + timedelta(days=3)
+    inbox = _inbox_with_age(4, max_per_day=50)
+    inbox.ramp_up_last_active_date = friday  # already sent today
+    with patch("app.queue_logic.time_provider.now", return_value=datetime(2026, 11, 13, 12, 0)):
+        assert compute_effective_daily_limit(inbox, friday, [0, 1, 2, 3, 4]) == 4
+        assert compute_effective_daily_limit(inbox, monday, [0, 1, 2, 3, 4]) == 5
+        # Unknown sending days keep the every-day projection
+        assert compute_effective_daily_limit(inbox, monday) == 7
+    # On Monday (Friday already counted in active_days, no weekend sends) the
+    # real cap matches the plan
+    with patch("app.queue_logic.time_provider.now", return_value=datetime(2026, 11, 16, 9, 0)):
+        assert compute_effective_daily_limit(inbox) == 5
+
+
+def test_daily_limit_hit_reported_once_per_inbox_per_day():
+    from app.jobs import _first_daily_limit_hit_today
+    today = date(2026, 11, 13)
+    assert _first_daily_limit_hit_today(1, today) is True
+    assert _first_daily_limit_hit_today(1, today) is False
+    assert _first_daily_limit_hit_today(2, today) is True
+    assert _first_daily_limit_hit_today(1, today + timedelta(days=1)) is True
+
+
 def test_ramp_up_projects_future_days_unless_paused():
     from app import time as time_provider
     from app.queue_logic import compute_effective_daily_limit

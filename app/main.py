@@ -7,6 +7,7 @@
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -112,6 +113,19 @@ async def lifespan(app: FastAPI):
             "interval",
             minutes=1,
             id="slot_scan",
+            replace_existing=True,
+            max_instances=1,
+        )
+        # Daily purge of old in-app notifications (NOTIFICATION_RETENTION_DAYS).
+        # next_run_time=now also clears any existing backlog right after startup.
+        from app.notifications import run_notification_retention_job
+
+        schedule.add_job(
+            run_notification_retention_job,
+            "interval",
+            hours=24,
+            next_run_time=datetime.now(),
+            id="notification_retention",
             replace_existing=True,
             max_instances=1,
         )

@@ -51,13 +51,15 @@ def _reset_jobs_auth_cooldown():
     one test would otherwise skip sends for an unrelated inbox in the next.
     """
     try:
-        from app.jobs import _inbox_auth_cooldown_until
+        from app.jobs import _inbox_auth_cooldown_until, _daily_limit_reported_on
     except Exception:  # pragma: no cover - import failure would break everything else
         yield
         return
     _inbox_auth_cooldown_until.clear()
+    _daily_limit_reported_on.clear()
     yield
     _inbox_auth_cooldown_until.clear()
+    _daily_limit_reported_on.clear()
 
 
 @contextlib.asynccontextmanager

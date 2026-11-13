@@ -74,6 +74,15 @@ class Settings:
             self.time_offset_days: int = int(os.getenv("TIME_OFFSET_DAYS", "0"))
         except ValueError:
             self.time_offset_days = 0
+
+        # In-app notifications older than this many days are deleted by a daily
+        # maintenance job so the table cannot grow without bound. 0 disables it.
+        try:
+            self.notification_retention_days: int = max(
+                0, int(os.getenv("NOTIFICATION_RETENTION_DAYS", "30"))
+            )
+        except ValueError:
+            self.notification_retention_days = 30
     
     @property
     def google_redirect_uri(self) -> str:

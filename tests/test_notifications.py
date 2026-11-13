@@ -101,3 +101,29 @@ async def test_dispatch_resolves_inbox_email_from_inbox_id(session):
     assert "an inbox" not in notif.title
     # The enriched payload is persisted so the UI can show details too.
     assert notif.data_json.get("inbox_email") == "resolved@example.com"
+
+
+@pytest.mark.asyncio
+async def test_purge_old_notifications_keeps_recent(session, monkeypatch):
+    from datetime import datetime, timedelta
+    import app.notifications as notifications_mod
+    from app.notifications import purge_old_notifications
+
+    monkeypatch.setattr(notifications_mod, "_PURGE_BATCH_SIZE", 2)  # exercise batching
+    user = User(username="owner", email="owner@example.com", password_hash="x", is_active=True)
+    session.add(user)
+    await session.flush()
+    now = datetime.utcnow()
+    for age_days in (40, 35, 31, 31, 29, 1):
+        session.add(Notification(
+            user_id=user.id, event_type="daily_limit", title="t", message="m",
+            created_at=now - timedelta(days=age_days),
+        ))
+    await session.flush()
+
+    assert await purge_old_notifications(session, retention_days=30) == 4
+    remaining = (await session.execute(select(Notification))).scalars().all()
+    assert len(remaining) == 2
+
+    # 0 disables the purge
+    assert await purge_old_notifications(session, retention_days=0) == 0

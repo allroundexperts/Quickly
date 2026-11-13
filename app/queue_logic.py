@@ -17,7 +17,11 @@ from app.models import Campaign, Sequence, CampaignLead, QueueSlot, Inbox, Email
 log = logging.getLogger("quickly.queue")
 
 
-def compute_effective_daily_limit(inbox, for_date: Optional[date] = None) -> int:
+def compute_effective_daily_limit(
+    inbox,
+    for_date: Optional[date] = None,
+    sending_days: Optional[List[int]] = None,
+) -> int:
     """Return the effective daily send limit for an inbox on a given date.
 
     When ramp-up is enabled the inbox starts at ramp_up_start emails and gains
@@ -26,8 +30,11 @@ def compute_effective_daily_limit(inbox, for_date: Optional[date] = None) -> int
     campaign, inbox paused, nothing due) do not advance the warm-up; progress
     is tracked by record_ramp_up_activity().
 
-    For future dates (queue projections) the inbox is assumed to send every
-    day from today onwards, unless it is paused.
+    For future dates (queue projections) the inbox is assumed to send on every
+    day from today up to *for_date* that is in *sending_days* (weekday ints;
+    every day when omitted), unless it is paused.  Counting non-sending days
+    (e.g. weekends) would over-book the projected day, leaving slots the send
+    job can never deliver under the real limit on that day.
     """
     if isinstance(inbox, int):
         return inbox
@@ -40,7 +47,14 @@ def compute_effective_daily_limit(inbox, for_date: Optional[date] = None) -> int
     # Today only counts towards the limit once it is over
     days_completed = active_days - (1 if last_active == today else 0)
     if ref > today and not getattr(inbox, "paused", False):
-        days_completed += (ref - today).days
+        if sending_days is None:
+            days_completed += (ref - today).days
+        else:
+            days_completed += sum(
+                1
+                for offset in range((ref - today).days)
+                if (today + timedelta(days=offset)).weekday() in sending_days
+            )
     start = max(1, getattr(inbox, "ramp_up_start", 1))
     step = max(1, getattr(inbox, "ramp_up_step_size", 1))
     return min(max(0, days_completed) * step + start, inbox.max_emails_per_day)
@@ -426,7 +440,7 @@ async def _check_all_sequences_fit(
         has_capacity = False
         for inbox_id, inbox_obj, _ in inboxes:
             # Use the date-specific warmup limit for accurate capacity checking
-            max_per_day = compute_effective_daily_limit(inbox_obj, current_date)
+            max_per_day = compute_effective_daily_limit(inbox_obj, current_date, sending_days)
             count = await count_slots_on_date(session, inbox_id, current_date, cache)
             simulated_key = (inbox_id, current_date)
             simulated_count = simulated_loads.get(simulated_key, 0)
@@ -623,7 +637,7 @@ async def reserve_slots_for_lead(
             picked = await _pick_inbox_with_capacity(
                 session,
                 # Compute the date-specific warmup limit for each candidate inbox
-                [(i[0], compute_effective_daily_limit(i[1], current_date)) for i in candidate_inboxes],
+                [(i[0], compute_effective_daily_limit(i[1], current_date, sending_days)) for i in candidate_inboxes],
                 current_date,
                 round_robin,
                 cache

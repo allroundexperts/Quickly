@@ -78,6 +78,34 @@ def _mark_inbox_auth_failure(inbox_id: int, now: datetime) -> None:
     _inbox_auth_cooldown_until[inbox_id] = now + _AUTH_FAILURE_COOLDOWN
 
 
+# ---------------------------------------------------------------------------
+# Daily-limit handling for the per-slot sender
+# ---------------------------------------------------------------------------
+# The slot scan re-dispatches every overdue slot each minute.  A slot that is
+# over its inbox's daily cap would otherwise log, fire a ``daily_limit``
+# webhook/notification and stay put on every tick for the rest of the day.
+# Instead we report once per inbox per day and kick off a global
+# recalculation, which moves the overflow to days that have capacity.
+_daily_limit_reported_on: dict[int, date] = {}
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _first_daily_limit_hit_today(inbox_id: int, today: date) -> bool:
+    """Return True only for the first daily-limit hit of *inbox_id* on *today*."""
+    if _daily_limit_reported_on.get(inbox_id) == today:
+        return False
+    _daily_limit_reported_on[inbox_id] = today
+    return True
+
+
+def _spawn_global_recalculate() -> None:
+    from app.routers.schedule import run_recalculate_all_in_new_session
+
+    task = asyncio.create_task(run_recalculate_all_in_new_session())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
 def clear_inbox_auth_failure(inbox_id: int) -> None:
     """Clear the in-memory auth-failure cooldown for *inbox_id*.
 
@@ -1196,8 +1224,15 @@ async def send_slot_job(slot_id: int) -> None:
         )
         already_sent = sent_count_res.scalar() or 0
         if already_sent >= max_per_day:
+            if not _first_daily_limit_hit_today(inbox.id, today):
+                log.debug(
+                    "send_slot_job: daily limit already reached for inbox %s, skipping slot %d",
+                    inbox.email, slot_id,
+                )
+                return
             log.warning(
-                "send_slot_job: daily limit hit for inbox %s (sent=%d cap=%d), skipping slot %d",
+                "send_slot_job: daily limit hit for inbox %s (sent=%d cap=%d), skipping slot %d; "
+                "recalculating queue to move remaining slots to days with capacity",
                 inbox.email, already_sent, max_per_day, slot_id,
             )
             await fire_webhook_event(
@@ -1205,6 +1240,7 @@ async def send_slot_job(slot_id: int) -> None:
                 {"inbox_id": inbox.id, "inbox_email": inbox.email, "date": str(today)},
             )
             await session.commit()
+            _spawn_global_recalculate()
             return
 
         # ── Rate-limit check ─────────────────────────────────────────────
