@@ -831,6 +831,15 @@ async function runSettings(
       const iCsv = f.custom_invalid_values_csv as string | undefined;
       delete body.custom_valid_values_csv;
       delete body.custom_invalid_values_csv;
+      const hJson = f.custom_headers_json as string | undefined;
+      delete body.custom_headers_json;
+      if (hJson && hJson.trim()) {
+        try {
+          body.custom_headers = JSON.parse(hJson);
+        } catch {
+          throw new Error('Custom Headers must be valid JSON');
+        }
+      }
       if (vCsv) {
         body.custom_valid_values = vCsv
           .split(',')

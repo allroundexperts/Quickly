@@ -1630,7 +1630,9 @@ Return the current email verification configuration.
   "custom_field_path": "",
   "custom_valid_values": [],
   "custom_invalid_values": [],
-  "custom_method": "GET"
+  "custom_method": "GET",
+  "custom_headers": {},
+  "custom_body": ""
 }
 ```
 
@@ -1650,6 +1652,8 @@ Save email verification settings.
 | `custom_valid_values` | string[] | Field values that indicate a valid address |
 | `custom_invalid_values` | string[] | Field values that indicate an invalid address |
 | `custom_method` | string | `GET` or `POST` |
+| `custom_headers` | object | Extra request headers, e.g. `{"Authorization": "Bearer ..."}`. Values may contain `{email}` |
+| `custom_body` | string | Request body template for `POST` (`{email}` is substituted). JSON bodies are sent as `application/json` unless a `Content-Type` header is set. With a body, `{email}` may appear in the body instead of the URL |
 
 ### `POST /api/settings/email-verification/test`
 

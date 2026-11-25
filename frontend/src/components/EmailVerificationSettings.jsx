@@ -37,6 +37,8 @@ export default function EmailVerificationSettings() {
   const [customValidValues,  setCustomValidValues]  = useState('');
   const [customInvalidValues,setCustomInvalidValues]= useState('');
   const [customMethod,       setCustomMethod]       = useState('GET');
+  const [customHeaders,      setCustomHeaders]      = useState([]); // [{ key, value }]
+  const [customBody,         setCustomBody]         = useState('');
 
   // ── probe ──────────────────────────────────────────────────────────────────
   const [probeEmail,  setProbeEmail]  = useState('');
@@ -57,6 +59,8 @@ export default function EmailVerificationSettings() {
       const cvv = (data.custom_valid_values || []).join(', ');
       const civ = (data.custom_invalid_values || []).join(', ');
       const cm  = data.custom_method || 'GET';
+      const ch  = Object.entries(data.custom_headers || {}).map(([key, value]) => ({ key, value: String(value) }));
+      const cb  = data.custom_body || '';
       setEnabled(data.enabled || false);
       setProvider(p);
       setApiKeyMasked(data.api_key_masked || '');
@@ -66,14 +70,37 @@ export default function EmailVerificationSettings() {
       setCustomValidValues(cvv);
       setCustomInvalidValues(civ);
       setCustomMethod(cm);
+      setCustomHeaders(ch);
+      setCustomBody(cb);
       setConnectionTested(data.connection_tested || false);
       setCredsChanged(false);
-      savedStateRef.current = { provider: p, customUrl: cu, customField: cf, customValidValues: cvv, customInvalidValues: civ, customMethod: cm };
+      savedStateRef.current = { provider: p, customUrl: cu, customField: cf, customValidValues: cvv, customInvalidValues: civ, customMethod: cm, customHeaders: headersKey(ch), customBody: cb };
     }).catch(() => {});
   }, []);
 
   // ── helpers ────────────────────────────────────────────────────────────────
   const parseValues = str => str.split(',').map(s => s.trim()).filter(Boolean);
+  const headersObject = () => Object.fromEntries(
+    customHeaders.filter(h => h.key.trim()).map(h => [h.key.trim(), h.value])
+  );
+  const bodyForRequest = () => (customMethod === 'POST' ? customBody : '');
+  // {email} may live in the URL, or (for POST) in the request body
+  const configError = () => {
+    if (!customUrl.trim()) return 'Enter the API URL';
+    if (customUrl.includes('{email}')) return null;
+    if (customMethod === 'POST' && customBody.includes('{email}')) return null;
+    return customMethod === 'POST'
+      ? 'Put {email} in the URL or the request body'
+      : 'URL must contain {email}';
+  };
+  const resetCustomResults = () => {
+    setProbeResult(null);
+    setCustomTestResults(null);
+  };
+  const updateHeader = (idx, field, value) => {
+    setCustomHeaders(hs => hs.map((h, i) => (i === idx ? { ...h, [field]: value } : h)));
+    resetCustomResults();
+  };
 
   const save = async () => {
     setSaving(true);
@@ -86,12 +113,14 @@ export default function EmailVerificationSettings() {
         custom_valid_values: parseValues(customValidValues),
         custom_invalid_values: parseValues(customInvalidValues),
         custom_method: customMethod,
+        custom_headers: headersObject(),
+        custom_body: bodyForRequest(),
       };
       if (apiKey) payload.api_key = apiKey;
       const res = await api.post('/settings/email-verification', payload);
       setApiKey('');
       setApiKeyMasked(res.api_key_masked || '');
-      savedStateRef.current = { provider, customUrl, customField, customValidValues, customInvalidValues, customMethod };
+      savedStateRef.current = { provider, customUrl, customField, customValidValues, customInvalidValues, customMethod, customHeaders: headersKey(customHeaders), customBody };
       setCustomTestResults(null);
       // Any credential change resets tested state on the backend; mirror that locally
       if (credsChanged) {
@@ -127,9 +156,8 @@ export default function EmailVerificationSettings() {
   };
 
   const probeUrl = async () => {
-    if (!customUrl || !customUrl.includes('{email}')) {
-      return notify({ type: 'error', message: 'URL must contain {email}' });
-    }
+    const err = configError();
+    if (err) return notify({ type: 'error', message: err });
     setProbing(true);
     setProbeResult(null);
     const emailToProbe = probeEmail.trim() || 'test@gmail.com';
@@ -140,6 +168,8 @@ export default function EmailVerificationSettings() {
         valid_values: [],
         invalid_values: [],
         method: customMethod,
+        headers: headersObject(),
+        body: bodyForRequest(),
         test_emails: [emailToProbe],
       });
       const first = res.results?.[0];
@@ -152,9 +182,8 @@ export default function EmailVerificationSettings() {
   };
 
   const runTest = async () => {
-    if (!customUrl || !customUrl.includes('{email}')) {
-      return notify({ type: 'error', message: 'URL must contain {email}' });
-    }
+    const err = configError();
+    if (err) return notify({ type: 'error', message: err });
     setCustomTesting(true);
     setCustomTestResults(null);
     const extra = extraEmails
@@ -169,6 +198,8 @@ export default function EmailVerificationSettings() {
         valid_values: parseValues(customValidValues),
         invalid_values: parseValues(customInvalidValues),
         method: customMethod,
+        headers: headersObject(),
+        body: bodyForRequest(),
         test_emails: extra, // empty = backend auto-picks from inboxes/leads/synthetics
       });
       setCustomTestResults(res.results || []);
@@ -218,6 +249,8 @@ export default function EmailVerificationSettings() {
                   custom_valid_values: parseValues(customValidValues),
                   custom_invalid_values: parseValues(customInvalidValues),
                   custom_method: customMethod,
+                  custom_headers: headersObject(),
+                  custom_body: bodyForRequest(),
                   ...(apiKey ? { api_key: apiKey } : {}),
                 });
                 notify({ type: 'success', message: `Email verification ${next ? 'enabled' : 'disabled'}` });
@@ -302,7 +335,8 @@ export default function EmailVerificationSettings() {
                   <StepLabel n={1} title="Enter your API's web address" />
                   <p className="text-xs text-gray-500 mb-2">
                     Include <code className="bg-gray-200 dark:bg-gray-700 px-1 rounded font-mono">{'{email}'}</code> where
-                    the email should go. The system will replace it automatically for each address checked.
+                    the email should go (for POST you can put it in the request body instead). The system will
+                    replace it automatically for each address checked.
                   </p>
                   <div className="flex gap-2 flex-wrap">
                     <input
@@ -319,12 +353,87 @@ export default function EmailVerificationSettings() {
                     <select
                       className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-800 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-300"
                       value={customMethod}
-                      onChange={e => setCustomMethod(e.target.value)}
+                      onChange={e => {
+                        setCustomMethod(e.target.value);
+                        resetCustomResults();
+                      }}
                     >
                       <option value="GET">GET</option>
                       <option value="POST">POST</option>
                     </select>
                   </div>
+
+                  {/* ── Headers ── */}
+                  <div className="mt-3">
+                    <p className="text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">
+                      Headers <span className="font-normal text-gray-400">(optional, e.g. an API key or Authorization header)</span>
+                    </p>
+                    {customHeaders.length > 0 && (
+                      <div className="space-y-2">
+                        {customHeaders.map((h, idx) => (
+                          <div key={idx} className="flex gap-2 items-center">
+                            <input
+                              type="text"
+                              className="w-44 min-w-0 border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-800 dark:border-gray-600 font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
+                              placeholder="Header name"
+                              value={h.key}
+                              onChange={e => updateHeader(idx, 'key', e.target.value)}
+                            />
+                            <input
+                              type="text"
+                              className="flex-1 min-w-0 border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-800 dark:border-gray-600 font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
+                              placeholder="Value"
+                              value={h.value}
+                              onChange={e => updateHeader(idx, 'value', e.target.value)}
+                            />
+                            <button
+                              type="button"
+                              className="text-gray-400 hover:text-red-500 px-2 text-sm"
+                              title="Remove header"
+                              onClick={() => {
+                                setCustomHeaders(hs => hs.filter((_, i) => i !== idx));
+                                resetCustomResults();
+                              }}
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="mt-2"
+                      onClick={() => setCustomHeaders(hs => [...hs, { key: '', value: '' }])}
+                    >
+                      + Add header
+                    </Button>
+                  </div>
+
+                  {/* ── Body (POST only) ── */}
+                  {customMethod === 'POST' && (
+                    <div className="mt-3">
+                      <p className="text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">
+                        Request body <span className="font-normal text-gray-400">(optional)</span>
+                      </p>
+                      <p className="text-xs text-gray-500 mb-1">
+                        Use <code className="bg-gray-200 dark:bg-gray-700 px-1 rounded font-mono">{'{email}'}</code> where
+                        the email should go. JSON bodies are sent as <code className="font-mono">application/json</code> unless
+                        you set a Content-Type header.
+                      </p>
+                      <textarea
+                        className="border rounded-lg px-3 py-2 text-sm w-full dark:bg-gray-800 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-300 resize-y font-mono"
+                        rows={4}
+                        placeholder={'{\n  "email": "{email}"\n}'}
+                        value={customBody}
+                        onChange={e => {
+                          setCustomBody(e.target.value);
+                          resetCustomResults();
+                        }}
+                      />
+                    </div>
+                  )}
                 </div>
 
                 {/* ── Step 2: Probe ── */}
@@ -341,7 +450,7 @@ export default function EmailVerificationSettings() {
                       value={probeEmail}
                       onChange={e => setProbeEmail(e.target.value)}
                     />
-                    <Button size="sm" variant="outline" onClick={probeUrl} disabled={probing || !customUrl}>
+                    <Button size="sm" variant="outline" onClick={probeUrl} disabled={probing || !!configError()}>
                       {probing ? 'Loading…' : 'Preview response'}
                     </Button>
                   </div>
@@ -431,7 +540,7 @@ export default function EmailVerificationSettings() {
                       : null;
                   })()}
                   <div className="mt-2">
-                    <Button size="sm" variant="outline" onClick={runTest} disabled={customTesting || !customUrl}>
+                    <Button size="sm" variant="outline" onClick={runTest} disabled={customTesting || !!configError()}>
                       {customTesting ? 'Testing…' : 'Run test'}
                     </Button>
                   </div>
@@ -497,6 +606,8 @@ export default function EmailVerificationSettings() {
                 customValidValues !== savedStateRef.current.customValidValues ||
                 customInvalidValues !== savedStateRef.current.customInvalidValues ||
                 customMethod !== savedStateRef.current.customMethod ||
+                headersKey(customHeaders) !== savedStateRef.current.customHeaders ||
+                customBody !== savedStateRef.current.customBody ||
                 !!apiKey
               ) && (
                 <p className="text-xs text-amber-600 font-medium">⚠ Unsaved changes — click Save to apply</p>
@@ -543,7 +654,12 @@ export default function EmailVerificationSettings() {
   );
 }
 
-/* ── small helper ── */
+/* ── small helpers ── */
+// Stable string form of the header rows, for unsaved-change detection
+function headersKey(rows) {
+  return JSON.stringify(rows.filter(h => h.key.trim()).map(h => [h.key.trim(), h.value]));
+}
+
 function StepLabel({ n, title }) {
   return (
     <div className="flex items-center gap-2 mb-1">

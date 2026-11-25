@@ -979,6 +979,8 @@ from app.app_settings import (
     EMAIL_VERIFICATION_CUSTOM_VALID_VALUES,
     EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES,
     EMAIL_VERIFICATION_CUSTOM_METHOD,
+    EMAIL_VERIFICATION_CUSTOM_HEADERS,
+    EMAIL_VERIFICATION_CUSTOM_BODY,
     EMAIL_VERIFICATION_CONNECTION_TESTED,
     EMAIL_VERIFICATION_LAST_ERROR,
     EMAIL_VERIFICATION_LAST_ERROR_AT,
@@ -997,6 +999,12 @@ class _EmailVerificationSettings(_BaseModel):
     custom_valid_values: list[str] = []
     custom_invalid_values: list[str] = []
     custom_method: str = "GET"
+    custom_headers: dict[str, str] = {}
+    custom_body: str = ""
+
+
+def _clean_headers(headers: dict[str, str] | None) -> dict[str, str]:
+    return {str(k).strip(): str(v) for k, v in (headers or {}).items() if str(k).strip()}
 
 
 @router.get("/email-verification")
@@ -1011,6 +1019,8 @@ async def get_email_verification_settings(db: AsyncSession = Depends(get_db)):
     custom_valid = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_VALID_VALUES) or "[]")
     custom_invalid = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES) or "[]")
     custom_method = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD) or "GET"
+    custom_headers = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_HEADERS) or "{}")
+    custom_body = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_BODY) or ""
     connection_tested = (await get_setting(db, EMAIL_VERIFICATION_CONNECTION_TESTED) or "false").lower() in ("true", "1", "yes")
     last_error = await get_setting(db, EMAIL_VERIFICATION_LAST_ERROR) or ""
     last_error_at = await get_setting(db, EMAIL_VERIFICATION_LAST_ERROR_AT) or ""
@@ -1025,6 +1035,8 @@ async def get_email_verification_settings(db: AsyncSession = Depends(get_db)):
         "custom_valid_values": custom_valid,
         "custom_invalid_values": custom_invalid,
         "custom_method": custom_method,
+        "custom_headers": custom_headers,
+        "custom_body": custom_body,
         "connection_tested": connection_tested,
         "last_error": last_error,
         "last_error_at": last_error_at,
@@ -1048,13 +1060,27 @@ async def save_email_verification_settings(
     stored_provider = await get_setting(db, EMAIL_VERIFICATION_PROVIDER) or "mailtester_ninja"
     stored_key_set = bool(await get_setting(db, EMAIL_VERIFICATION_API_KEY) or "")
     stored_custom_url = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_URL) or ""
+    stored_custom_method = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD) or "GET"
+    stored_custom_headers = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_HEADERS) or "{}")
+    stored_custom_body = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_BODY) or ""
     currently_tested = (await get_setting(db, EMAIL_VERIFICATION_CONNECTION_TESTED) or "false").lower() in ("true", "1", "yes")
 
     new_key = payload.api_key.strip()
+    new_method = payload.custom_method.strip().upper() or "GET"
+    new_headers = _clean_headers(payload.custom_headers)
+    new_body = payload.custom_body if new_method == "POST" else ""
     creds_changed = (
         bool(new_key)
         or (payload.provider.strip() or "mailtester_ninja") != stored_provider
-        or (payload.provider.strip() == "custom" and payload.custom_url.strip() != stored_custom_url)
+        or (
+            payload.provider.strip() == "custom"
+            and (
+                payload.custom_url.strip() != stored_custom_url
+                or new_method != stored_custom_method.upper()
+                or new_headers != stored_custom_headers
+                or new_body != stored_custom_body
+            )
+        )
     )
 
     # Block enabling without a successful connection test
@@ -1073,7 +1099,9 @@ async def save_email_verification_settings(
     await put_setting(db, EMAIL_VERIFICATION_CUSTOM_FIELD, payload.custom_field_path.strip())
     await put_setting(db, EMAIL_VERIFICATION_CUSTOM_VALID_VALUES, json.dumps(payload.custom_valid_values))
     await put_setting(db, EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES, json.dumps(payload.custom_invalid_values))
-    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD, payload.custom_method.strip().upper() or "GET")
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD, new_method)
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_HEADERS, json.dumps(new_headers))
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_BODY, new_body)
 
     # Reset connection_tested whenever credentials change
     if creds_changed:
@@ -1120,6 +1148,8 @@ class _CustomProviderTestRequest(_BaseModel):
     valid_values: list[str] = []
     invalid_values: list[str] = []
     method: str = "GET"
+    headers: dict[str, str] = {}
+    body: str = ""
     test_emails: list[str] = []  # leave empty → backend auto-selects sample emails
 
 
@@ -1144,16 +1174,17 @@ async def test_custom_email_verification(
     from app.email_verification import CustomHttpProvider, _get_nested
     from app.models import Inbox, Lead
 
-    if not payload.url_template or "{email}" not in payload.url_template:
-        raise HTTPException(400, "url_template must contain {email}")
-
     provider = CustomHttpProvider(
         url_template=payload.url_template.strip(),
         field_path=payload.field_path.strip(),
         valid_values=payload.valid_values,
         invalid_values=payload.invalid_values,
         method=payload.method,
+        headers=_clean_headers(payload.headers),
+        body_template=payload.body,
     )
+    if provider.config_error:
+        raise HTTPException(400, provider.config_error)
 
     # Build the list of (email, source) pairs to test
     emails_with_source: list[tuple[str, str]] = []
@@ -1204,7 +1235,9 @@ async def test_custom_email_verification(
     await put_setting(db, EMAIL_VERIFICATION_CUSTOM_FIELD, payload.field_path.strip())
     await put_setting(db, EMAIL_VERIFICATION_CUSTOM_VALID_VALUES, _json.dumps(payload.valid_values))
     await put_setting(db, EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES, _json.dumps(payload.invalid_values))
-    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD, payload.method.strip().upper() or "GET")
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD, provider.method or "GET")
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_HEADERS, _json.dumps(provider.headers))
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_BODY, provider.body_template)
     await put_setting(db, EMAIL_VERIFICATION_CONNECTION_TESTED, "true")
     await put_setting(db, EMAIL_VERIFICATION_LAST_ERROR, "")
     await db.commit()

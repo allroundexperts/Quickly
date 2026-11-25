@@ -5,9 +5,11 @@ To add a new provider, subclass ``BaseVerificationProvider`` and register it
 in ``PROVIDERS``.
 """
 import asyncio
+import json
 import logging
 from abc import ABC, abstractmethod
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -102,11 +104,29 @@ def _get_nested(data: Any, path: str) -> Any:
     return value
 
 
+def custom_config_error(url_template: str, method: str = "GET", body_template: str = "") -> str | None:
+    """Validate a custom provider config. ``{email}`` must appear in the URL,
+    or (for POST requests) in the request body."""
+    url_template = (url_template or "").strip()
+    if not url_template:
+        return "URL is required"
+    if not url_template.lower().startswith(("http://", "https://")):
+        return "URL must start with http:// or https://"
+    in_url = "{email}" in url_template
+    in_body = (method or "GET").upper() == "POST" and "{email}" in (body_template or "")
+    if not (in_url or in_body):
+        return "{email} must appear in the URL" + (" or the request body" if (method or "").upper() == "POST" else "")
+    return None
+
+
 class CustomHttpProvider(BaseVerificationProvider):
     """User-configured HTTP/S verification endpoint.
 
-    The caller supplies a URL template containing ``{email}`` which is
-    replaced with the address to verify.  A dot-notation *field_path* is
+    The caller supplies a URL template (and, for POST, an optional body
+    template) containing ``{email}`` which is replaced with the address to
+    verify.  Optional custom headers are sent with every request; header
+    values may also contain ``{email}``.  A JSON body is sent as
+    ``application/json`` unless a Content-Type header is configured.  A dot-notation *field_path* is
     used to extract a single value from the JSON response; that value is
     then matched against *valid_values* or *invalid_values* (case-insensitive)
     to produce the final status.  Any value not found in either list yields
@@ -120,25 +140,55 @@ class CustomHttpProvider(BaseVerificationProvider):
         valid_values: list[str],
         invalid_values: list[str],
         method: str = "GET",
+        headers: dict[str, str] | None = None,
+        body_template: str = "",
     ) -> None:
         self.url_template = url_template.strip()
         self.field_path = field_path.strip()
         self.valid_values: set[str] = {v.strip().lower() for v in valid_values if v.strip()}
         self.invalid_values: set[str] = {v.strip().lower() for v in invalid_values if v.strip()}
         self.method = method.upper()
+        self.headers: dict[str, str] = {
+            str(k).strip(): str(v)
+            for k, v in (headers or {}).items()
+            if str(k).strip()
+        }
+        # Request body is only sent for POST requests
+        self.body_template = (body_template or "") if self.method == "POST" else ""
+
+    @property
+    def config_error(self) -> str | None:
+        """Return a human-readable error if the configuration is unusable."""
+        return custom_config_error(self.url_template, self.method, self.body_template)
+
+    def _build_body(self, email: str) -> tuple[str | None, bool]:
+        """Render the body template. Returns (content, is_json)."""
+        if not self.body_template.strip():
+            return None, False
+        try:
+            # Substitute a JSON-escaped email so quotes/backslashes can't break JSON
+            json_email = json.dumps(email)[1:-1]
+            rendered = self.body_template.replace("{email}", json_email)
+            json.loads(rendered)
+            return rendered, True
+        except ValueError:
+            return self.body_template.replace("{email}", email), False
 
     async def verify(self, email: str, api_key: str) -> VerificationResult:  # noqa: ARG002
-        if not self.url_template or "{email}" not in self.url_template:
-            return VerificationResult(
-                email, UNKNOWN, message="Invalid URL template — must contain {email}"
-            )
-        url = self.url_template.replace("{email}", email)
+        err = self.config_error
+        if err:
+            return VerificationResult(email, UNKNOWN, message=err)
+        url = self.url_template.replace("{email}", quote(email, safe="@"))
+        headers = {k: v.replace("{email}", email) for k, v in self.headers.items()}
+        content, is_json = self._build_body(email) if self.method == "POST" else (None, False)
+        if content is not None and not any(k.lower() == "content-type" for k in headers):
+            headers["Content-Type"] = "application/json" if is_json else "text/plain"
         async with httpx.AsyncClient(follow_redirects=True) as client:
             try:
                 if self.method == "POST":
-                    resp = await client.post(url, timeout=15)
+                    resp = await client.post(url, headers=headers, content=content, timeout=15)
                 else:
-                    resp = await client.get(url, timeout=15)
+                    resp = await client.get(url, headers=headers, timeout=15)
                 if resp.status_code != 200:
                     return VerificationResult(
                         email, UNKNOWN, message=f"HTTP {resp.status_code}"

@@ -398,6 +398,23 @@ export const settingsFields: INodeProperties[] = [
         ],
         default: 'GET',
       },
+      {
+        displayName: 'Custom Headers (JSON)',
+        name: 'custom_headers_json',
+        type: 'string',
+        default: '',
+        placeholder: '{"Authorization": "Bearer ..."}',
+        description: 'JSON object of extra request headers',
+      },
+      {
+        displayName: 'Custom Body',
+        name: 'custom_body',
+        type: 'string',
+        typeOptions: { rows: 4 },
+        default: '',
+        placeholder: '{"email": "{email}"}',
+        description: 'Request body template for POST requests; {email} is substituted',
+      },
     ],
   },
   {

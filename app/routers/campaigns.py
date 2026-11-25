@@ -2262,6 +2262,8 @@ async def _run_background_verification(lead_ids: list[int], *, reverify: bool = 
         EMAIL_VERIFICATION_CUSTOM_VALID_VALUES,
         EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES,
         EMAIL_VERIFICATION_CUSTOM_METHOD,
+        EMAIL_VERIFICATION_CUSTOM_HEADERS,
+        EMAIL_VERIFICATION_CUSTOM_BODY,
     )
     from app.email_verification import verify_single, BLOCK_SEND_STATUSES, PENDING, CustomHttpProvider
     import json
@@ -2302,10 +2304,15 @@ async def _run_background_verification(lead_ids: list[int], *, reverify: bool = 
                 valid_vals = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_VALID_VALUES) or "[]")
                 invalid_vals = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES) or "[]")
                 custom_method = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD) or "GET"
-                if not custom_url or "{email}" not in custom_url:
-                    log.warning("Custom email verification provider has no valid URL template configured")
+                custom_headers = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_HEADERS) or "{}")
+                custom_body = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_BODY) or ""
+                _cp = CustomHttpProvider(
+                    custom_url, custom_field, valid_vals, invalid_vals, custom_method,
+                    headers=custom_headers, body_template=custom_body,
+                )
+                if _cp.config_error:
+                    log.warning("Custom email verification provider misconfigured: %s", _cp.config_error)
                     return
-                _cp = CustomHttpProvider(custom_url, custom_field, valid_vals, invalid_vals, custom_method)
                 async def _do_verify(email: str) -> "VerificationResult":  # type: ignore[name-defined]  # noqa: E731
                     return await _cp.verify(email, "")
             else:
