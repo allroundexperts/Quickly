@@ -652,23 +652,46 @@ async def unpause_inbox(
 
 
 @router.delete("/{inbox_id}")
-async def delete_inbox(inbox_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_inbox(
+    inbox_id: int,
+    background_tasks: BackgroundTasks = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete an inbox, detaching it from campaigns first.
+
+    Its pending queue slots are removed (``queue_slot.inbox_id`` is a
+    non-null FK without ON DELETE, so leaving them would make the delete fail
+    on Postgres) and a global recalculation reschedules those leads on the
+    campaigns' remaining inboxes.
+    """
     result = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
     inbox = result.scalar_one_or_none()
     if not inbox:
         raise HTTPException(404, "Inbox not found")
+    email = inbox.email
     # Remove campaign assignments referencing this inbox
     await db.execute(
         CampaignInbox.__table__.delete().where(CampaignInbox.inbox_id == inbox_id)
     )
+    # Drop its pending sends; the recalculation below reschedules them
+    removed_slots = (
+        await db.execute(QueueSlot.__table__.delete().where(QueueSlot.inbox_id == inbox_id))
+    ).rowcount or 0
     # Nullify inbox_id on email logs (preserve logs, break FK constraint)
     await db.execute(
         EmailLog.__table__.update().where(EmailLog.inbox_id == inbox_id).values(inbox_id=None)
     )
     await db.delete(inbox)
-    await db.flush()
-    log.info("delete_inbox: deleted inbox %s (%s)", inbox_id, inbox.email)
-    return {"ok": True}
+    await db.commit()
+    log.info(
+        "delete_inbox: deleted inbox %s (%s), removed %d queue slot(s)",
+        inbox_id, email, removed_slots,
+    )
+    if removed_slots and background_tasks is not None:
+        from app.routers.schedule import enqueue_global_recalculate
+
+        enqueue_global_recalculate(background_tasks)
+    return {"ok": True, "removed_queue_slots": removed_slots}
 
 
 @router.post("/{inbox_id}/generate-connect-url", response_model=ConnectUrlResponse)

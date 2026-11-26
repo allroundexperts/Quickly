@@ -66,7 +66,7 @@ async def test_test_mode_settings_api(engine):
 
 
 @pytest.mark.asyncio
-async def test_add_opens_setting_endpoint(session):
+async def test_add_opens_setting_endpoint(session, authed):
     """Verify the ``POST /api/settings/add-opens`` helper adds events.
 
     Create a minimal email log then invoke the new endpoint via HTTP;

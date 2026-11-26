@@ -62,6 +62,20 @@ def _reset_jobs_auth_cooldown():
     _daily_limit_reported_on.clear()
 
 
+@pytest.fixture
+def authed():
+    """Bypass login for tests that call authenticated API routes via TestClient."""
+    from app.auth import get_current_user
+    from app.main import app
+
+    async def _fake_user():
+        return object()
+
+    app.dependency_overrides[get_current_user] = _fake_user
+    yield
+    app.dependency_overrides.pop(get_current_user, None)
+
+
 @contextlib.asynccontextmanager
 async def _noop_mcp_lifespan():
     yield

@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 
-def test_schedule_api_basic_endpoints():
+def test_schedule_api_basic_endpoints(authed):
     # No manual initialization required; the shared engine fixture
     # ensures the schema is in place and is wired into the FastAPI app.
     """Verify that the schedule-related APIs exist and return the expected
@@ -52,7 +52,7 @@ def test_schedule_api_basic_endpoints():
 
 
 @pytest.mark.asyncio
-async def test_schedule_sent_includes_opens_clicks(session):
+async def test_schedule_sent_includes_opens_clicks(session, authed):
     """When logs have associated opens/clicks we should return them without
     triggering lazy-loading errors.
 

@@ -328,22 +328,52 @@ async def test_delete_inbox_simple(session):
     """Deleting a standalone inbox should succeed."""
     inbox = await make_inbox(session, email="delete-simple@test.com")
     res = await inbox_router.delete_inbox(inbox.id, db=session)
-    assert res == {"ok": True}
+    assert res["ok"] is True
     result = await session.execute(select(Inbox).where(Inbox.id == inbox.id))
     assert result.scalar_one_or_none() is None
 
 
 @pytest.mark.asyncio
-async def test_delete_inbox_in_use_raises_400(session):
-    """Inbox linked to a campaign or carrying slots cannot be deleted;
-    caller must manually remove it from campaigns first."""
+async def test_delete_inbox_in_use_detaches_and_clears_slots(session):
+    """Deleting an inbox that a campaign uses detaches it, removes its pending
+    queue slots (non-null FK without ON DELETE) and queues a recalculation so
+    those leads are rescheduled on the remaining inboxes."""
     inbox_a = await make_inbox(session, email="del-a@test.com")
+    inbox_b = await make_inbox(session, email="del-b@test.com")
     campaign = await make_campaign(session)
     await make_campaign_inbox(session, campaign.id, inbox_a.id)
+    await make_campaign_inbox(session, campaign.id, inbox_b.id, position=1)
+    lead = await make_lead(session, email="slotted@example.com")
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    await make_queue_slot(session, cl.id, inbox_a.id)
+    await make_queue_slot(session, cl.id, inbox_b.id, sequence_index=1)
+    inbox_a_id, inbox_b_id = inbox_a.id, inbox_b.id
+    await session.commit()
 
-    with pytest.raises(HTTPException) as exc_info:
-        await inbox_router.delete_inbox(inbox_a.id, db=session)
-    assert exc_info.value.status_code == 400
+    tasks = BackgroundTasks()
+    res = await inbox_router.delete_inbox(inbox_a_id, background_tasks=tasks, db=session)
+
+    assert res == {"ok": True, "removed_queue_slots": 1}
+    assert len(tasks.tasks) == 1  # global recalculation queued
+    session.expire_all()
+    assert await session.get(Inbox, inbox_a_id) is None
+    remaining_links = (await session.execute(select(CampaignInbox.inbox_id))).scalars().all()
+    assert remaining_links == [inbox_b_id]
+    remaining_slots = (await session.execute(select(QueueSlot.inbox_id))).scalars().all()
+    assert remaining_slots == [inbox_b_id]
+
+
+@pytest.mark.asyncio
+async def test_delete_unused_inbox_skips_recalculation(session):
+    inbox = await make_inbox(session, email="unused@test.com")
+    inbox_id = inbox.id
+    await session.commit()
+
+    tasks = BackgroundTasks()
+    res = await inbox_router.delete_inbox(inbox_id, background_tasks=tasks, db=session)
+
+    assert res == {"ok": True, "removed_queue_slots": 0}
+    assert tasks.tasks == []
 
 
 

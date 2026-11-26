@@ -1603,6 +1603,26 @@ class TestCampaignStats:
         res_get = await get_campaign(camp.id, db=session)
         assert res_get.stats == stats
 
+    async def test_reply_count_includes_unclassified_and_skips_auto_replies(self, session):
+        """Replies count unless the enrollment is classified as out-of-office or
+        auto-reply; an unclassified (NULL interest) reply must still count."""
+        from app.routers.campaigns import get_campaign
+        from app.models import LeadReply
+
+        camp = await make_campaign(session, name="reply-camp", stop_on_reply=False)
+        await make_sequence(session, camp.id, position=0)
+        interests = {"plain@x.test": None, "keen@x.test": "interested",
+                     "away@x.test": "out_of_office", "bot@x.test": "auto_reply"}
+        for email, interest in interests.items():
+            lead = await make_lead(session, email=email)
+            cl = await make_campaign_lead(session, camp.id, lead.id)
+            cl.interest_status = interest
+            session.add(LeadReply(lead_id=lead.id, campaign_id=camp.id))
+        await session.flush()
+
+        res = await get_campaign(camp.id, db=session)
+        assert res.stats.replies == 2
+
     async def test_stats_reflects_reply_and_slot_deletion(self, session):
         """When a lead replies we clear its remaining slots; stats should
         report zero pending scheduled emails so that progress appears complete.

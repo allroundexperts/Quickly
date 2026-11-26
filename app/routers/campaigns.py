@@ -197,7 +197,11 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
             )
             .where(
                 LeadReply.campaign_id.in_(campaign_ids),
-                CampaignLead.interest_status.notin_(["out_of_office", "auto_reply"]),
+                # NULL interest (not classified yet) is a real reply: NOT IN alone drops it
+                or_(
+                    CampaignLead.interest_status.is_(None),
+                    CampaignLead.interest_status.notin_(["out_of_office", "auto_reply"]),
+                ),
             )
             .group_by(LeadReply.campaign_id)
         )
@@ -407,7 +411,11 @@ async def get_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
         )
         .where(
             LeadReply.campaign_id == campaign_id,
-            CampaignLead.interest_status.notin_(["out_of_office", "auto_reply"]),
+            # NULL interest (not classified yet) is a real reply: NOT IN alone drops it
+            or_(
+                CampaignLead.interest_status.is_(None),
+                CampaignLead.interest_status.notin_(["out_of_office", "auto_reply"]),
+            ),
         )
     )
     stats["replies"] = res.scalar() or 0

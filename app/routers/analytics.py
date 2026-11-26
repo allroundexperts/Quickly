@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import cast, Date, func, select
+from sqlalchemy import cast, Date, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -96,7 +96,11 @@ async def daily_analytics(
         .where(
             LeadReply.replied_at >= start,
             LeadReply.replied_at < end,
-            CampaignLead.interest_status.notin_(["out_of_office", "auto_reply"]),
+            # NULL interest (not classified yet) is a real reply: NOT IN alone drops it
+            or_(
+                CampaignLead.interest_status.is_(None),
+                CampaignLead.interest_status.notin_(["out_of_office", "auto_reply"]),
+            ),
         )
         .group_by(cast(LeadReply.replied_at, Date), LeadReply.campaign_id)
     )
