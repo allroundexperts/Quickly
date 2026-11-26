@@ -371,17 +371,17 @@ export default function EmailVerificationSettings() {
                     {customHeaders.length > 0 && (
                       <div className="space-y-2">
                         {customHeaders.map((h, idx) => (
-                          <div key={idx} className="flex gap-2 items-center">
+                          <div key={idx} className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)_auto] gap-2 items-center">
                             <input
                               type="text"
-                              className="w-44 min-w-0 border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-800 dark:border-gray-600 font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
+                              className="min-w-0 border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-800 dark:border-gray-600 font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
                               placeholder="Header name"
                               value={h.key}
                               onChange={e => updateHeader(idx, 'key', e.target.value)}
                             />
                             <input
                               type="text"
-                              className="flex-1 min-w-0 border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-800 dark:border-gray-600 font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
+                              className="min-w-0 border rounded-lg px-3 py-1.5 text-sm dark:bg-gray-800 dark:border-gray-600 font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
                               placeholder="Value"
                               value={h.value}
                               onChange={e => updateHeader(idx, 'value', e.target.value)}
