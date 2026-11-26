@@ -1008,6 +1008,9 @@ class VerificationJobItem(Base):
     job_id = Column(Integer, ForeignKey("verification_job.id", ondelete="CASCADE"), nullable=False, index=True)
     lead_id = Column(Integer, ForeignKey("lead.id", ondelete="CASCADE"), nullable=False, index=True)
     status = Column(String(16), nullable=False, default="pending")
+    # True: re-check (lead keeps its status until a different result comes
+    # back). False: first check (lead is "pending" until verified).
+    reverify = Column(Boolean, nullable=False, default=False)
     result_status = Column(String(32), nullable=True)
     message = Column(Text, nullable=True)
     attempts = Column(Integer, nullable=False, default=0)

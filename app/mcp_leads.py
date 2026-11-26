@@ -658,14 +658,17 @@ async def reconcile_personalized(ctx: Context, campaign_id: int) -> str:
 
 
 @leads_mcp.tool()
-async def verify_campaign_leads(ctx: Context, campaign_id: int, reverify: bool = False) -> str:
-    """Queue email verification for a campaign's unverified leads (reverify=true re-checks verified ones).
-    Returns the verification job; follow its progress with list_verification_jobs / get_verification_job."""
+async def verify_campaign_leads(
+    ctx: Context, campaign_id: int, all_leads: bool = False, reverify: bool = False,
+) -> str:
+    """Queue email verification for a campaign's unverified leads. all_leads=true verifies every lead,
+    re-checking already-verified ones (they keep their result until the new one is known); reverify is an
+    alias of all_leads. Returns the verification job; follow its progress with list_verification_jobs / get_verification_job."""
     return await _call(
         ctx,
         "POST",
         f"/api/campaigns/{campaign_id}/leads/verify",
-        params={"reverify": _bool_param(reverify)},
+        params={"all": _bool_param(all_leads or reverify)},
     )
 
 

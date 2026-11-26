@@ -219,6 +219,12 @@ async def _run_migrations(conn) -> None:
         "ALTER TABLE email_open ADD COLUMN IF NOT EXISTS user_agent VARCHAR(512) NULL",
         "ALTER TABLE email_click ADD COLUMN IF NOT EXISTS user_agent VARCHAR(512) NULL",
         "ALTER TABLE tracked_link ADD COLUMN IF NOT EXISTS last_hit_at TIMESTAMP WITHOUT TIME ZONE NULL",
+        # 2026-11-26: per-item re-check flag so one verification job can mix
+        # first checks and re-checks; backfill items of existing re-check jobs
+        "ALTER TABLE verification_job_item ADD COLUMN IF NOT EXISTS reverify BOOLEAN NOT NULL DEFAULT FALSE",
+        "UPDATE verification_job_item SET reverify = TRUE FROM verification_job "
+        "WHERE verification_job_item.job_id = verification_job.id "
+        "AND verification_job.reverify AND NOT verification_job_item.reverify",
     ]
     # custom_email_override table (IF NOT EXISTS — must be a separate stmt
     # because it uses raw SQL, not ALTER TABLE)

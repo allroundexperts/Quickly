@@ -502,30 +502,24 @@ function LeadsTab({ leads, campaignId, refresh, reloadLeads, onViewQueue }) {
     }).catch(() => {});
   }, []);
 
-  // Queue a verification job for unverified leads (or re-verify when forceReverify=true).
+  // Queue every lead in the campaign for verification. Unverified leads are held
+  // back until checked; verified ones keep their result while being re-checked.
   // Progress, pause/resume, retry and cancel live in <VerificationJobPanel>.
-  const verifyAllLeads = async (forceReverify = false) => {
+  const verifyAllLeads = async () => {
+    const ok = await confirm(
+      `Verify all ${leads.length} lead(s) in this campaign? Each lead uses one verification request. ` +
+      'Leads already verified keep their current result until the new check finishes.'
+    );
+    if (!ok) return;
     setVerifying(true);
     try {
-      const url = `/campaigns/${campaignId}/leads/verify` + (forceReverify ? '?reverify=true' : '');
-      const res = await api.post(url);
-
-      // Nothing to queue – ask the user if they want to re-verify existing ones
-      if (res.queued === 0 && res.needs_reverify && !forceReverify && !res.job) {
-        setVerifying(false);
-        const confirmed = await confirm(
-          `All ${res.total_verified} lead(s) are already verified. Re-verify them all?`
-        );
-        if (confirmed) verifyAllLeads(true);
-        return;
-      }
-
+      const res = await api.post(`/campaigns/${campaignId}/leads/verify?all=true`);
       if (res.job) {
         notify({
           type: res.queued ? 'success' : 'info',
           message: res.queued
             ? `Queued ${res.queued} lead(s) for verification`
-            : 'These leads are already queued for verification',
+            : 'All leads are already waiting in the verification queue',
         });
         setVerificationJobKey(k => k + 1);
       } else {
@@ -766,7 +760,7 @@ function LeadsTab({ leads, campaignId, refresh, reloadLeads, onViewQueue }) {
           onClick={() => verifyAllLeads()}
           disabled={verifying || !emailVerifEnabled}
           title={emailVerifEnabled
-            ? 'Check every lead in this campaign that has not been verified yet'
+            ? 'Verify every lead in this campaign, including ones already verified'
             : 'Turn on Email Verification in Settings to verify leads'}
         >
           {verifying ? 'Verifying…' : 'Verify All Emails'}

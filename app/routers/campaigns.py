@@ -2254,17 +2254,23 @@ async def _detect_providers_background(lead_email_pairs: list[tuple[int, str]]) 
 @router.post("/{campaign_id}/leads/verify")
 async def trigger_verification_for_campaign(
     campaign_id: int,
-    reverify: bool = Query(False, description="Re-verify already-verified leads"),
+    all: bool = Query(False, description="Verify every lead in the campaign, including already-verified ones"),
+    reverify: bool = Query(False, description="Alias of all=true (kept for compatibility)"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Trigger email verification for leads in a campaign.
+    """Queue email verification for leads in a campaign.
 
-    By default only leads with no verification status are queued.  Pass
-    ``?reverify=true`` to re-check leads that were already verified.
-    The response always includes a ``needs_reverify`` boolean so the UI
-    can prompt the user when there is nothing new to verify but verified
-    leads exist.
+    By default only unverified leads (and any stuck in ``pending``) are
+    queued.  Pass ``?all=true`` to verify every lead in the campaign:
+    unverified ones are held back from sending until checked, already
+    verified ones keep their result (and keep sending) while re-checked.
+    Leads already waiting in the campaign's active job stay queued once;
+    failed ones are queued again.
+
+    The response includes ``needs_reverify`` so the UI can offer ``all=true``
+    when there is nothing unverified left.
     """
+    verify_all = all or reverify
     result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
     if not result.scalar_one_or_none():
         raise HTTPException(404, "Campaign not found")
@@ -2290,8 +2296,8 @@ async def trigger_verification_for_campaign(
     )
     total_verified = verified_count_result.scalar() or 0
 
-    if reverify:
-        # Re-verify ALL leads (unverified + already-verified)
+    if verify_all:
+        # Every lead in the campaign (unverified + already-verified)
         result = await db.execute(
             select(Lead.id)
             .join(CampaignLead, CampaignLead.lead_id == Lead.id)
@@ -2322,7 +2328,10 @@ async def trigger_verification_for_campaign(
         }
 
     job, reason, queued = await enqueue_verification(
-        db, lead_ids, campaign_id=campaign_id, reverify=reverify, source="campaign_verify",
+        db, lead_ids, campaign_id=campaign_id,
+        # all: decide per lead (re-check verified ones, first-check the rest)
+        reverify=None if verify_all else False,
+        source="campaign_verify",
     )
     if job is None:
         raise HTTPException(400, reason)

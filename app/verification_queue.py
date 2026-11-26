@@ -217,15 +217,25 @@ async def enqueue_verification(
     lead_ids: list[int],
     *,
     campaign_id: int | None,
-    reverify: bool = False,
+    reverify: bool | None = False,
     source: str = "campaign_verify",
 ) -> tuple[VerificationJob | None, str | None, int]:
     """Queue *lead_ids* for verification using the caller's session.
 
-    The caller commits.  Leads are added to an existing active job for the
-    same campaign (and mode) when there is one, otherwise a new job is
-    created.  Unless *reverify* is set, leads are marked ``pending`` so they
-    are not sent before their result is known.
+    The caller commits.  Leads are added to the campaign's active job when
+    there is one, otherwise a new job is created.
+
+    *reverify* picks how each lead is checked:
+
+    * ``False``: first check. The lead is marked ``pending`` (not sent) until
+      its result is known.
+    * ``True``: re-check. The lead keeps its current status, and keeps
+      sending, until a different result comes back.
+    * ``None``: decide per lead: re-check leads that already have a result,
+      first-check unverified or ``pending`` ones.
+
+    Leads already waiting in the job are left as they are; leads whose item
+    failed in the job are queued again.
 
     Returns ``(job, None, newly_queued)``, or ``(None, reason, 0)`` when
     verification can't run; in that case any of the leads stuck in
@@ -234,59 +244,80 @@ async def enqueue_verification(
     lead_ids = list(dict.fromkeys(lead_ids))
     verifier, reason = await load_email_verifier(db)
     if verifier is None:
-        if not reverify:
+        if reverify is not True:
             await release_pending_leads(db, lead_ids)
         return None, reason, 0
     if not lead_ids:
         return None, "No leads to verify", 0
+
+    if reverify is None:
+        res = await db.execute(
+            select(Lead.id, Lead.email_verification_status).where(Lead.id.in_(lead_ids))
+        )
+        reverify_ids = {lid for lid, st in res.all() if st not in (None, PENDING)}
+    elif reverify:
+        reverify_ids = set(lead_ids)
+    else:
+        reverify_ids = set()
 
     campaign_clause = (
         VerificationJob.campaign_id.is_(None)
         if campaign_id is None
         else VerificationJob.campaign_id == campaign_id
     )
-    res = await db.execute(
-        select(VerificationJob)
-        .where(
-            campaign_clause,
-            VerificationJob.reverify == reverify,
-            VerificationJob.status.in_(ACTIVE_JOB_STATUSES),
+    job = (
+        await db.execute(
+            select(VerificationJob)
+            .where(campaign_clause, VerificationJob.status.in_(ACTIVE_JOB_STATUSES))
+            .order_by(VerificationJob.id.desc())
+            .limit(1)
         )
-        .order_by(VerificationJob.id.desc())
-        .limit(1)
-    )
-    job = res.scalar_one_or_none()
+    ).scalar_one_or_none()
+    existing: dict[int, VerificationJobItem] = {}
     if job is None:
         job = VerificationJob(
-            campaign_id=campaign_id, status="queued", reverify=reverify, source=source,
+            campaign_id=campaign_id, status="queued", reverify=reverify is True, source=source,
         )
         db.add(job)
         await db.flush()
-        already: set[int] = set()
     else:
         res = await db.execute(
-            select(VerificationJobItem.lead_id).where(
+            select(VerificationJobItem).where(
                 VerificationJobItem.job_id == job.id,
-                VerificationJobItem.status.in_(("pending", "processing")),
+                VerificationJobItem.status.in_(("pending", "processing", "failed")),
             )
         )
-        already = {r[0] for r in res.all()}
+        existing = {item.lead_id: item for item in res.scalars().all()}
         if job.status == "running":
             job.status = "queued"  # let the worker pick it up again in order
 
-    new_ids = [lid for lid in lead_ids if lid not in already]
-    db.add_all(VerificationJobItem(job_id=job.id, lead_id=lid, status="pending") for lid in new_ids)
-    if not reverify and lead_ids:
+    queued = 0
+    for lid in lead_ids:
+        item = existing.get(lid)
+        if item is not None and item.status in ("pending", "processing"):
+            continue  # already waiting in this job
+        if item is not None:  # failed: queue it again
+            item.status = "pending"
+            item.message = None
+            item.reverify = lid in reverify_ids
+        else:
+            db.add(VerificationJobItem(
+                job_id=job.id, lead_id=lid, status="pending", reverify=lid in reverify_ids,
+            ))
+        queued += 1
+
+    first_check_ids = [lid for lid in lead_ids if lid not in reverify_ids]
+    if first_check_ids:
         await db.execute(
-            update(Lead).where(Lead.id.in_(lead_ids)).values(email_verification_status=PENDING)
+            update(Lead).where(Lead.id.in_(first_check_ids)).values(email_verification_status=PENDING)
         )
     await db.flush()
     notify_worker()
     log.info(
-        "Queued %d lead(s) for verification in job %s (campaign=%s, reverify=%s)",
-        len(new_ids), job.id, campaign_id, reverify,
+        "Queued %d lead(s) for verification in job %s (campaign=%s, %d re-check)",
+        queued, job.id, campaign_id, len(reverify_ids),
     )
-    return job, None, len(new_ids)
+    return job, None, queued
 
 
 async def enqueue_verification_in_new_session(
@@ -324,13 +355,13 @@ async def _record_error(message: str) -> None:
 
 
 async def _apply_result(
-    db: AsyncSession, job: VerificationJob, lead: Lead, vr: VerificationResult,
+    db: AsyncSession, reverify: bool, lead: Lead, vr: VerificationResult,
 ) -> None:
     """Write a successful verification result to the lead and its queue."""
     old_status = lead.email_verification_status
     new_status = vr.status
     changed = old_status != new_status
-    if job.reverify and not changed:
+    if reverify and not changed:
         return
 
     lead.email_verification_status = new_status
@@ -346,7 +377,7 @@ async def _apply_result(
     else:
         _to_schedule.append(lead.id)
 
-    if job.reverify and changed:
+    if reverify and changed:
         try:
             from app.database import AsyncSessionLocal
             from app.webhooks import fire_webhook_event
@@ -453,7 +484,7 @@ async def process_next_item() -> bool:
             return True
 
         await db.refresh(lead)
-        await _apply_result(db, job, lead, vr)
+        await _apply_result(db, bool(item.reverify), lead, vr)
         item.status = "done"
         item.result_status = vr.status
         item.message = vr.message
@@ -625,6 +656,7 @@ async def cancel_job(db: AsyncSession, job_id: int) -> tuple[VerificationJob, in
         select(VerificationJobItem.lead_id).where(
             VerificationJobItem.job_id == job.id,
             VerificationJobItem.status.in_(("pending", "failed")),
+            VerificationJobItem.reverify.is_(False),
         )
     )
     lead_ids = [r[0] for r in res.all()]
@@ -638,6 +670,7 @@ async def cancel_job(db: AsyncSession, job_id: int) -> tuple[VerificationJob, in
     )
     job.status = "cancelled"
     job.finished_at = utcnow()
-    released = [] if job.reverify else await release_pending_leads(db, lead_ids)
+    # Re-checked leads kept their old status; only first-check leads are pending
+    released = await release_pending_leads(db, lead_ids)
     await db.flush()
     return job, len(released)

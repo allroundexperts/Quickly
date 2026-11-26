@@ -164,7 +164,7 @@ async def test_verify_endpoint_rejects_when_verification_cannot_run(session):
     await session.commit()
 
     with pytest.raises(HTTPException) as exc:
-        await trigger_verification_for_campaign(campaign.id, reverify=False, db=session)
+        await trigger_verification_for_campaign(campaign.id, all=False, reverify=False, db=session)
     assert exc.value.status_code == 400
 
 
@@ -180,13 +180,13 @@ async def test_verify_endpoint_queues_unverified_and_stuck_and_merges_repeat_cli
     done.email_verification_status = "valid"
     await session.commit()
 
-    res = await trigger_verification_for_campaign(campaign.id, reverify=False, db=session)
+    res = await trigger_verification_for_campaign(campaign.id, all=False, reverify=False, db=session)
     assert res["queued"] == 2
     assert res["total_verified"] == 1
     assert res["job"]["total"] == 2 and res["job"]["status"] == "queued"
 
     # A second click while the job is active adds nothing and reuses the job
-    again = await trigger_verification_for_campaign(campaign.id, reverify=False, db=session)
+    again = await trigger_verification_for_campaign(campaign.id, all=False, reverify=False, db=session)
     assert again["queued"] == 0
     assert again["job"]["id"] == res["job"]["id"]
 
@@ -386,3 +386,106 @@ async def test_min_interval_setting_parsing(session):
         await put_setting(session, EMAIL_VERIFICATION_MIN_INTERVAL, raw)
         await session.commit()
         assert await _REAL_LOAD_MIN_INTERVAL(session) == expected, raw
+
+
+# ── "Verify all" ────────────────────────────────────────────────────────────
+
+async def _items(session, job_id):
+    session.expire_all()
+    rows = (
+        await session.execute(
+            select(Lead.email, VerificationJobItem.status, VerificationJobItem.reverify)
+            .join(Lead, Lead.id == VerificationJobItem.lead_id)
+            .where(VerificationJobItem.job_id == job_id)
+            .order_by(VerificationJobItem.id)
+        )
+    ).all()
+    return [tuple(r) for r in rows]
+
+
+@pytest.mark.asyncio
+async def test_verify_all_queues_every_lead_after_a_finished_job(session, fake_verifier):
+    """After a job finishes with failures, "verify all" re-checks everyone, not
+    only the failed leads."""
+    from app.routers.campaigns import trigger_verification_for_campaign
+
+    script, _ = fake_verifier
+    script["flaky@test.com"] = "error"
+    script["bad@test.com"] = INVALID
+    await _enable_custom_provider(session)
+    campaign, _ = await _campaign_with_leads(session, "good@test.com", "bad@test.com", "flaky@test.com")
+    campaign_id = campaign.id
+    first = await trigger_verification_for_campaign(campaign_id, all=False, reverify=False, db=session)
+    await _drain()
+    assert await _statuses(session) == {
+        "good@test.com": "valid", "bad@test.com": "invalid", "flaky@test.com": "pending",
+    }
+
+    res = await trigger_verification_for_campaign(campaign_id, all=True, reverify=False, db=session)
+    assert res["queued"] == 3
+    assert res["job"]["id"] != first["job"]["id"]  # the old job was completed
+    # Verified leads keep their result while re-checked; the failed one stays held back
+    assert await _statuses(session) == {
+        "good@test.com": "valid", "bad@test.com": "invalid", "flaky@test.com": "pending",
+    }
+    assert sorted(await _items(session, res["job"]["id"])) == [
+        ("bad@test.com", "pending", True),
+        ("flaky@test.com", "pending", False),
+        ("good@test.com", "pending", True),
+    ]
+
+    script["flaky@test.com"] = VALID
+    script["bad@test.com"] = VALID  # the address got fixed since the last check
+    await _drain()
+    assert await _statuses(session) == {
+        "good@test.com": "valid", "bad@test.com": "valid", "flaky@test.com": "valid",
+    }
+
+
+@pytest.mark.asyncio
+async def test_verify_all_merges_into_active_job_without_duplicates(session, fake_verifier):
+    from app.routers.campaigns import trigger_verification_for_campaign
+
+    script, _ = fake_verifier
+    script["flaky@test.com"] = "error"
+    await _enable_custom_provider(session)
+    campaign, _ = await _campaign_with_leads(
+        session, "flaky@test.com", "done@test.com", "waiting@test.com",
+    )
+    res = await trigger_verification_for_campaign(campaign.id, all=False, reverify=False, db=session)
+    job_id = res["job"]["id"]
+    assert await vq.process_next_item()  # flaky -> failed
+    assert await vq.process_next_item()  # done -> valid
+    await vq.pause_job(session, job_id)  # waiting stays pending, job stays active
+    await session.commit()
+
+    again = await trigger_verification_for_campaign(campaign.id, all=True, reverify=False, db=session)
+    assert again["job"]["id"] == job_id
+    assert again["queued"] == 2  # flaky re-queued, done re-checked; waiting already queued
+    assert await _items(session, job_id) == [
+        ("flaky@test.com", "pending", False),   # failed item reset, not duplicated
+        ("done@test.com", "done", False),
+        ("waiting@test.com", "pending", False),
+        ("done@test.com", "pending", True),     # re-check of the verified lead
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_mixed_job_releases_only_first_check_leads(session, fake_verifier):
+    await _enable_custom_provider(session)
+    campaign, (fresh, known) = await _campaign_with_leads(session, "fresh@test.com", "known@test.com")
+    known.email_verification_status = "invalid"
+    await session.commit()
+
+    job, _, queued = await vq.enqueue_verification(
+        session, [fresh.id, known.id], campaign_id=campaign.id, reverify=None,
+    )
+    job_id = job.id
+    await session.commit()
+    assert queued == 2
+    assert await _statuses(session) == {"fresh@test.com": "pending", "known@test.com": "invalid"}
+
+    _, released = await vq.cancel_job(session, job_id)
+    await session.commit()
+    assert released == 1
+    assert await _statuses(session) == {"fresh@test.com": None, "known@test.com": "invalid"}

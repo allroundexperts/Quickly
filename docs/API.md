@@ -742,7 +742,7 @@ The detected `provider` value (e.g. `"google"`, `"office365"`) is stored on the 
 
 ### `POST /api/campaigns/{id}/leads/verify`
 
-Queue email verification for the campaign's unverified leads (plus any stuck in `pending`) as a verification job. Pass `?reverify=true` to re-check every lead. Requires email verification to be enabled and configured in Settings (otherwise **400**). If the campaign already has an active job, the leads are added to it.
+Queue email verification for the campaign's unverified leads (plus any stuck in `pending`) as a verification job. Pass `?all=true` to verify every lead in the campaign: unverified leads are held back from sending until checked, already verified leads keep their result (and keep sending) until the new check finishes. `?reverify=true` is an alias of `all=true`. Leads already waiting in the active job are not queued twice; failed ones are queued again. Requires email verification to be enabled and configured in Settings (otherwise **400**). If the campaign already has an active job, the leads are added to it.
 
 **Response:** `{ "ok": true, "queued": 42, "needs_reverify": false, "total_verified": 10, "job": { ... } }` (`job` has the shape below)
 
