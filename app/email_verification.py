@@ -30,11 +30,22 @@ BLOCK_SEND_STATUSES = {INVALID, RISKY}
 class VerificationResult:
     """Normalised output returned by every provider."""
 
-    def __init__(self, email: str, status: str, raw: dict | None = None, message: str = ""):
+    def __init__(
+        self,
+        email: str,
+        status: str,
+        raw: dict | None = None,
+        message: str = "",
+        error: bool = False,
+    ):
         self.email = email
         self.status = status        # one of the constants above
         self.raw = raw or {}        # raw provider response for debugging
         self.message = message      # human-readable explanation
+        # True when the provider could not be reached or answered with an
+        # error (timeout, HTTP error, bad JSON). Such results are retryable,
+        # unlike a genuine "unknown" verdict from the provider.
+        self.error = error
 
 
 # ── Base class ───────────────────────────────────────────────────────────────
@@ -63,13 +74,13 @@ class MailtesterNinjaProvider(BaseVerificationProvider):
                         await asyncio.sleep(3 * (attempt + 1))
                         continue
                     if resp.status_code != 200:
-                        return VerificationResult(email, UNKNOWN, message=f"HTTP {resp.status_code}")
+                        return VerificationResult(email, UNKNOWN, message=f"HTTP {resp.status_code}", error=True)
                     data = resp.json()
                     return self._normalise(email, data)
                 except (httpx.RequestError, Exception) as exc:
                     log.warning("MailtesterNinja attempt %d failed for %s: %s", attempt + 1, email, exc)
                     await asyncio.sleep(2)
-        return VerificationResult(email, UNKNOWN, message="All retries exhausted")
+        return VerificationResult(email, UNKNOWN, message="All retries exhausted", error=True)
 
     @staticmethod
     def _normalise(email: str, data: dict) -> VerificationResult:
@@ -177,7 +188,7 @@ class CustomHttpProvider(BaseVerificationProvider):
     async def verify(self, email: str, api_key: str) -> VerificationResult:  # noqa: ARG002
         err = self.config_error
         if err:
-            return VerificationResult(email, UNKNOWN, message=err)
+            return VerificationResult(email, UNKNOWN, message=err, error=True)
         url = self.url_template.replace("{email}", quote(email, safe="@"))
         headers = {k: v.replace("{email}", email) for k, v in self.headers.items()}
         content, is_json = self._build_body(email) if self.method == "POST" else (None, False)
@@ -191,20 +202,20 @@ class CustomHttpProvider(BaseVerificationProvider):
                     resp = await client.get(url, headers=headers, timeout=15)
                 if resp.status_code != 200:
                     return VerificationResult(
-                        email, UNKNOWN, message=f"HTTP {resp.status_code}"
+                        email, UNKNOWN, message=f"HTTP {resp.status_code}", error=True
                     )
                 try:
                     data = resp.json()
                 except Exception:
                     return VerificationResult(
-                        email, UNKNOWN, message="Response was not valid JSON"
+                        email, UNKNOWN, message="Response was not valid JSON", error=True
                     )
                 return self._normalise(email, data)
             except httpx.RequestError as exc:
-                return VerificationResult(email, UNKNOWN, message=f"Request error: {exc}")
+                return VerificationResult(email, UNKNOWN, message=f"Request error: {exc}", error=True)
             except Exception as exc:
                 log.warning("CustomHttpProvider error for %s: %s", email, exc)
-                return VerificationResult(email, UNKNOWN, message=f"Unexpected error: {exc}")
+                return VerificationResult(email, UNKNOWN, message=f"Unexpected error: {exc}", error=True)
 
     def _normalise(self, email: str, data: Any) -> VerificationResult:
         raw_value = _get_nested(data, self.field_path) if self.field_path else None

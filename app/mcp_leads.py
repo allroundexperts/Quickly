@@ -532,11 +532,14 @@ async def add_campaign_leads(
     campaign_id: int,
     leads: list[dict[str, Any]],
     skip_duplicates: bool = True,
-    verify_emails: bool = False,
+    verify_emails: bool = True,
     confirm_only: bool = False,
 ) -> str:
     """Add leads to a campaign. Each item needs email; optional name, custom_data object, status, interest,
-    email_verification_status. confirm_only=true reports what would happen without enrolling."""
+    email_verification_status. confirm_only=true reports what would happen without enrolling.
+    verify_emails (default true) checks addresses before scheduling when email verification is enabled and
+    configured in Settings; otherwise leads are scheduled normally and verification_skipped_reason says why.
+    Pass verify_emails=false to skip verification."""
     if not leads:
         return json.dumps({"error": "leads array must not be empty"})
     params = {
@@ -560,10 +563,12 @@ async def import_campaign_leads_csv(
     campaign_id: int,
     csv_content: str,
     skip_duplicates: bool = True,
-    verify_emails: bool = False,
+    verify_emails: bool = True,
     confirm_only: bool = False,
 ) -> str:
-    """Import leads from CSV text (header row with email, name, and any custom field columns)."""
+    """Import leads from CSV text (header row with email, name, and any custom field columns).
+    verify_emails (default true) checks addresses before scheduling when email verification is enabled and
+    configured in Settings; otherwise leads are scheduled normally."""
     params = {
         "skip_duplicates": _bool_param(skip_duplicates),
         "verify_emails": _bool_param(verify_emails),
@@ -654,7 +659,8 @@ async def reconcile_personalized(ctx: Context, campaign_id: int) -> str:
 
 @leads_mcp.tool()
 async def verify_campaign_leads(ctx: Context, campaign_id: int, reverify: bool = False) -> str:
-    """Queue email verification for a campaign's unverified leads (reverify=true re-checks verified ones)."""
+    """Queue email verification for a campaign's unverified leads (reverify=true re-checks verified ones).
+    Returns the verification job; follow its progress with list_verification_jobs / get_verification_job."""
     return await _call(
         ctx,
         "POST",
@@ -667,6 +673,54 @@ async def verify_campaign_leads(ctx: Context, campaign_id: int, reverify: bool =
 async def get_campaign_verification_status(ctx: Context, campaign_id: int) -> str:
     """Summarize email verification statuses for a campaign's leads."""
     return await _call(ctx, "GET", f"/api/campaigns/{campaign_id}/leads/verification-status")
+
+
+@leads_mcp.tool()
+async def list_verification_jobs(
+    ctx: Context,
+    campaign_id: int | None = None,
+    active_only: bool = False,
+    limit: int = 10,
+) -> str:
+    """List email verification jobs (newest first) with progress: total, remaining, done, failed and
+    results by status. Filter by campaign_id; active_only=true returns queued, running or paused jobs."""
+    params: dict[str, Any] = {"active_only": _bool_param(active_only), "limit": limit}
+    if campaign_id is not None:
+        params["campaign_id"] = campaign_id
+    return await _call(ctx, "GET", "/api/verification-jobs", params=params)
+
+
+@leads_mcp.tool()
+async def get_verification_job(ctx: Context, job_id: int) -> str:
+    """Get one email verification job's progress and results."""
+    return await _call(ctx, "GET", f"/api/verification-jobs/{job_id}")
+
+
+@leads_mcp.tool()
+async def list_verification_job_items(
+    ctx: Context,
+    job_id: int,
+    status: str = "",
+    limit: int = 50,
+    offset: int = 0,
+) -> str:
+    """List leads in a verification job with their status, result and error message.
+    status filters by pending, processing, done, failed or cancelled."""
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
+    if status.strip():
+        params["status"] = status.strip()
+    return await _call(ctx, "GET", f"/api/verification-jobs/{job_id}/items", params=params)
+
+
+@leads_mcp.tool()
+async def control_verification_job(ctx: Context, job_id: int, action: str) -> str:
+    """Control an email verification job. action: pause, resume, retry_failed (queue failed leads again)
+    or cancel (stop; leads not yet verified are released and send unverified)."""
+    paths = {"pause": "pause", "resume": "resume", "retry_failed": "retry-failed", "cancel": "cancel"}
+    key = action.strip().lower().replace("-", "_")
+    if key not in paths:
+        return json.dumps({"error": f"action must be one of {sorted(paths)}"})
+    return await _call(ctx, "POST", f"/api/verification-jobs/{job_id}/{paths[key]}")
 
 
 @leads_mcp.tool()

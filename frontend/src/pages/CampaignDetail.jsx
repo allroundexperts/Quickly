@@ -5,6 +5,7 @@ import { useLoading } from '../context/LoadingContext';
 import { api, apiCache } from '../api';
 import { Button } from '../components/ui/Button';
 import { FileUploadArea } from '../components/ui/FileUploadArea';
+import VerificationJobPanel from '../components/VerificationJobPanel';
 import { Card } from '../components/ui/Card';
 import DatePicker from '../components/ui/DatePicker';
 import { useConfirm } from '../context/ConfirmContext';
@@ -103,6 +104,11 @@ export default function CampaignDetail() {
   }, [id]);
 
   useEffect(() => { loadAll(); }, [id]);
+
+  // Quiet leads-only reload (no global loading bar), used while verification runs
+  const reloadLeads = useCallback(async () => {
+    try { setLeads(await api.get(`/campaigns/${id}/leads`)); } catch {}
+  }, [id]);
 
   const scheduleWaitMinutes = useMemo(() => {
     const ids = campaign?.inbox_ids;
@@ -297,6 +303,7 @@ export default function CampaignDetail() {
           leads={leads}
           campaignId={id}
           refresh={loadAll}
+          reloadLeads={reloadLeads}
           onViewQueue={email => {
             setQueueFilter(email);
             setActiveTab('queue');
@@ -400,7 +407,7 @@ function deriveStatuses(lead) {
 }
 
 // ─── Leads Tab ────────────────────────────────────────────────────────────────
-function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
+function LeadsTab({ leads, campaignId, refresh, reloadLeads, onViewQueue }) {
   const notify  = useNotify();
   const confirm = useConfirm();
   const [mode, setMode]   = useState('single');
@@ -420,6 +427,7 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
   const fileInputRef = useRef(null);
   const [verifying, setVerifying] = useState(false);
   const [verificationSummary, setVerificationSummary] = useState(null);
+  const [verificationJobKey, setVerificationJobKey] = useState(0); // bump to reload the job panel
   const [showLeadsConfirm, setShowLeadsConfirm] = useState(false);
   const [confirmPayload, setConfirmPayload] = useState(null);
   const [confirmPreview, setConfirmPreview] = useState(null);
@@ -494,76 +502,56 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
     }).catch(() => {});
   }, []);
 
-  // Interval ref so we can clear the poll on unmount or completion
-  const verifyPollRef = useRef(null);
-
-  // Verify all unverified leads (or re-verify when forceReverify=true)
+  // Queue a verification job for unverified leads (or re-verify when forceReverify=true).
+  // Progress, pause/resume, retry and cancel live in <VerificationJobPanel>.
   const verifyAllLeads = async (forceReverify = false) => {
     setVerifying(true);
     try {
       const url = `/campaigns/${campaignId}/leads/verify` + (forceReverify ? '?reverify=true' : '');
       const res = await api.post(url);
 
-      // Nothing queued – ask the user if they want to re-verify existing ones
-      if (res.queued === 0 && res.needs_reverify && !forceReverify) {
-        const confirmed = window.confirm(
-          `All ${res.total_verified} lead(s) are already verified.\nRe-verify them all?`
-        );
+      // Nothing to queue – ask the user if they want to re-verify existing ones
+      if (res.queued === 0 && res.needs_reverify && !forceReverify && !res.job) {
         setVerifying(false);
+        const confirmed = await confirm(
+          `All ${res.total_verified} lead(s) are already verified. Re-verify them all?`
+        );
         if (confirmed) verifyAllLeads(true);
         return;
       }
 
-      if (res.queued === 0) {
+      if (res.job) {
+        notify({
+          type: res.queued ? 'success' : 'info',
+          message: res.queued
+            ? `Queued ${res.queued} lead(s) for verification`
+            : 'These leads are already queued for verification',
+        });
+        setVerificationJobKey(k => k + 1);
+      } else {
         notify({ type: 'info', message: 'No leads to verify.' });
-        setVerifying(false);
-        return;
       }
-
-      notify({ type: 'success', message: `Verifying ${res.queued} lead(s)…` });
-
-      // Poll verification-status every 5 s and show a toast per change
-      let prevStatuses = { ...(verificationSummary?.statuses || {}) };
-
-      verifyPollRef.current = setInterval(async () => {
-        try {
-          const newSummary = await api.get(`/campaigns/${campaignId}/leads/verification-status`);
-          setVerificationSummary(newSummary);
-          const ns = newSummary.statuses || {};
-
-          // Toast for any counts that increased
-          Object.entries(ns).forEach(([status, count]) => {
-            const delta = count - (prevStatuses[status] || 0);
-            if (delta > 0 && status !== 'pending') {
-              const isWarn = status === 'invalid' || status === 'risky';
-              notify({
-                type: isWarn ? 'warning' : 'success',
-                message: `${delta} lead(s) verified → ${status}`,
-              });
-            }
-          });
-
-          prevStatuses = { ...ns };
-
-          // Stop polling once no leads remain in pending state
-          if (!ns.pending || ns.pending === 0) {
-            clearInterval(verifyPollRef.current);
-            verifyPollRef.current = null;
-            setVerifying(false);
-            refresh();
-          }
-        } catch {
-          // ignore transient poll errors
-        }
-      }, 5000);
     } catch (e) {
       notify({ type: 'error', message: e.message });
+    } finally {
       setVerifying(false);
     }
   };
 
-  // Clean up any running verification poll when the component unmounts
-  useEffect(() => () => { if (verifyPollRef.current) clearInterval(verifyPollRef.current); }, []);
+  // Called by the job panel whenever more leads have been processed. While the
+  // job runs, reload just the leads (throttled); when it ends, refresh everything
+  // because verified leads get queue slots.
+  const lastLeadsReloadRef = useRef(0);
+  const onVerificationProgress = useCallback((job) => {
+    loadVerificationSummary();
+    const finished = job && ['completed', 'cancelled'].includes(job.status);
+    if (finished) {
+      refresh();
+    } else if (Date.now() - lastLeadsReloadRef.current >= 10000) {
+      lastLeadsReloadRef.current = Date.now();
+      (reloadLeads || refresh)();
+    }
+  }, [refresh, reloadLeads, loadVerificationSummary]);
 
   const startEdit = (leadId, field, val) => {
     setEditCell({ leadId, field });
@@ -714,6 +702,7 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
       setConfirmPayload(null);
       setImportFile(null);
       setLastDuplicates(res?.duplicate_leads || []);
+      if (res?.verification_job_id) setVerificationJobKey(k => k + 1);
       refresh();
     } catch (err) {
       notify({ type: 'error', message: err.message });
@@ -771,11 +760,17 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
           </svg>
           {importing ? 'Importing…' : 'Import CSV'}
         </FileUploadArea>
-        {emailVerifEnabled && (
-          <Button size="sm" variant="outline" onClick={verifyAllLeads} disabled={verifying}>
-            {verifying ? 'Verifying…' : 'Verify All Emails'}
-          </Button>
-        )}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => verifyAllLeads()}
+          disabled={verifying || !emailVerifEnabled}
+          title={emailVerifEnabled
+            ? 'Check every lead in this campaign that has not been verified yet'
+            : 'Turn on Email Verification in Settings to verify leads'}
+        >
+          {verifying ? 'Verifying…' : 'Verify All Emails'}
+        </Button>
         <span className="text-xs text-gray-400 ml-1">
           {filteredLeads.length}{hasActiveFilter ? `/${leads.length}` : ''} lead{filteredLeads.length !== 1 ? 's' : ''}
         </span>
@@ -795,6 +790,13 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
           >Clear filters</button>
         )}
       </div>
+
+      {/* Email verification job progress + controls */}
+      <VerificationJobPanel
+        campaignId={campaignId}
+        reloadKey={verificationJobKey}
+        onProgress={onVerificationProgress}
+      />
 
       {/* Duplicate leads notice */}
       {lastDuplicates.length > 0 && (

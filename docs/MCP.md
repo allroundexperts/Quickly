@@ -83,15 +83,19 @@ Each tool proxies one REST endpoint, and the JSON responses are the same as thos
 | Tool | Endpoint |
 |------|--------|
 | `list_campaign_leads` | `GET /api/campaigns/{id}/leads` |
-| `add_campaign_leads` | `POST /api/campaigns/{id}/leads` (bulk add / enroll) |
+| `add_campaign_leads` | `POST /api/campaigns/{id}/leads` (bulk add / enroll). `verify_emails` defaults to `true` here: addresses are verified when email verification is enabled and configured, otherwise leads are scheduled normally |
 | `import_campaign_leads_csv` | `POST /api/campaigns/{id}/leads/import` (pass the CSV as text in `csv_content`) |
 | `export_campaign_leads_csv` | `GET /api/campaigns/{id}/leads/export` (returns the CSV as text) |
 | `update_campaign_lead` | `PATCH /api/campaigns/{id}/leads/{lead_id}` (`status`, `interest`, `sending_paused`) |
 | `remove_campaign_lead` | `DELETE /api/campaigns/{id}/leads/{lead_id}` |
 | `write_custom_email` | `PATCH /api/campaigns/{id}/leads/{lead_id}/custom-email/{sequence_id}` |
 | `reconcile_personalized` | `POST /api/campaigns/{id}/reconcile-personalized` |
-| `verify_campaign_leads` | `POST /api/campaigns/{id}/leads/verify` |
+| `verify_campaign_leads` | `POST /api/campaigns/{id}/leads/verify` (queues a verification job) |
 | `get_campaign_verification_status` | `GET /api/campaigns/{id}/leads/verification-status` |
+| `list_verification_jobs` | `GET /api/verification-jobs` |
+| `get_verification_job` | `GET /api/verification-jobs/{id}` |
+| `list_verification_job_items` | `GET /api/verification-jobs/{id}/items` |
+| `control_verification_job` | `POST /api/verification-jobs/{id}/pause`, `/resume`, `/retry-failed`, `/cancel` |
 | `detect_campaign_lead_providers` | `POST /api/campaigns/{id}/leads/detect-providers` |
 
 ### Campaign activity

@@ -322,6 +322,7 @@ async def get_time_offset():
 
 
 from pydantic import BaseModel as _BaseModel
+from pydantic import Field as _Field
 
 class _TimeOffset(_BaseModel):
     time_offset_days: int
@@ -981,6 +982,7 @@ from app.app_settings import (
     EMAIL_VERIFICATION_CUSTOM_METHOD,
     EMAIL_VERIFICATION_CUSTOM_HEADERS,
     EMAIL_VERIFICATION_CUSTOM_BODY,
+    EMAIL_VERIFICATION_MIN_INTERVAL,
     EMAIL_VERIFICATION_CONNECTION_TESTED,
     EMAIL_VERIFICATION_LAST_ERROR,
     EMAIL_VERIFICATION_LAST_ERROR_AT,
@@ -1001,6 +1003,8 @@ class _EmailVerificationSettings(_BaseModel):
     custom_method: str = "GET"
     custom_headers: dict[str, str] = {}
     custom_body: str = ""
+    # Minimum seconds between verification requests; None keeps the current value
+    min_interval_seconds: float | None = _Field(None, ge=0, le=3600)
 
 
 def _clean_headers(headers: dict[str, str] | None) -> dict[str, str]:
@@ -1011,6 +1015,7 @@ def _clean_headers(headers: dict[str, str] | None) -> dict[str, str]:
 async def get_email_verification_settings(db: AsyncSession = Depends(get_db)):
     """Return the current email verification configuration."""
     import json
+    from app.verification_queue import load_min_interval
     enabled = (await get_setting(db, EMAIL_VERIFICATION_ENABLED) or "false").lower() in ("true", "1", "yes")
     provider = await get_setting(db, EMAIL_VERIFICATION_PROVIDER) or "mailtester_ninja"
     raw_key = await get_setting(db, EMAIL_VERIFICATION_API_KEY) or ""
@@ -1037,6 +1042,7 @@ async def get_email_verification_settings(db: AsyncSession = Depends(get_db)):
         "custom_method": custom_method,
         "custom_headers": custom_headers,
         "custom_body": custom_body,
+        "min_interval_seconds": await load_min_interval(db),
         "connection_tested": connection_tested,
         "last_error": last_error,
         "last_error_at": last_error_at,
@@ -1102,6 +1108,8 @@ async def save_email_verification_settings(
     await put_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD, new_method)
     await put_setting(db, EMAIL_VERIFICATION_CUSTOM_HEADERS, json.dumps(new_headers))
     await put_setting(db, EMAIL_VERIFICATION_CUSTOM_BODY, new_body)
+    if payload.min_interval_seconds is not None:
+        await put_setting(db, EMAIL_VERIFICATION_MIN_INTERVAL, str(payload.min_interval_seconds))
 
     # Reset connection_tested whenever credentials change
     if creds_changed:

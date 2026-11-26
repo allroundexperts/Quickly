@@ -969,3 +969,48 @@ WEBHOOK_EVENT_TYPES = [
     "token_expired",       # OAuth refresh or SMTP/IMAP login failed (see data.provider/error_type)
     "inbox.send_failing",  # An SMTP inbox failed to send repeatedly (see data.last_send_error)
 ]
+
+
+class VerificationJob(Base):
+    """A durable batch of email verifications processed by the background
+    verification worker (``app.verification_queue``).
+
+    status: queued | running | paused | completed | cancelled
+    """
+    __tablename__ = "verification_job"
+    id = Column(Integer, primary_key=True, index=True)
+    campaign_id = Column(Integer, ForeignKey("campaign.id", ondelete="CASCADE"), nullable=True, index=True)
+    status = Column(String(16), nullable=False, default="queued", index=True)
+    # When true, leads keep their current status (and keep sending) while being re-checked
+    reverify = Column(Boolean, nullable=False, default=False)
+    # Where the job came from: campaign_verify | leads_added | lead_recovery
+    source = Column(String(32), nullable=False, default="campaign_verify")
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    items = relationship("VerificationJobItem", back_populates="job", cascade="all, delete-orphan")
+
+
+class VerificationJobItem(Base):
+    """One lead to verify inside a :class:`VerificationJob`.
+
+    status: pending | processing | done | failed | cancelled
+    ``result_status`` holds the verification outcome (valid, invalid, ...)
+    once the item is done.
+    """
+    __tablename__ = "verification_job_item"
+    __table_args__ = (
+        Index("ix_verification_job_item_job_status", "job_id", "status"),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("verification_job.id", ondelete="CASCADE"), nullable=False, index=True)
+    lead_id = Column(Integer, ForeignKey("lead.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(16), nullable=False, default="pending")
+    result_status = Column(String(32), nullable=True)
+    message = Column(Text, nullable=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    job = relationship("VerificationJob", back_populates="items")
+    lead = relationship("Lead")

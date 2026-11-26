@@ -502,9 +502,17 @@ async def _finalize_lead_recovery(
     if not lead_ids:
         return
     if verify:
-        from app.routers.campaigns import _run_background_verification
+        from app.verification_queue import enqueue_verification
 
-        asyncio.create_task(_run_background_verification(lead_ids))
+        job, _reason, _ = await enqueue_verification(
+            db, lead_ids, campaign_id=None, source="lead_recovery",
+        )
+        await db.commit()
+        if job is None:
+            # Verification can't run; enqueue_verification released the leads.
+            from app.routers.schedule import enqueue_global_recalculate
+
+            enqueue_global_recalculate(background_tasks)
     else:
         await db.commit()
         from app.routers.schedule import enqueue_global_recalculate

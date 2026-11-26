@@ -44,6 +44,9 @@ EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES = "email_verification_custom_invalid_va
 EMAIL_VERIFICATION_CUSTOM_METHOD = "email_verification_custom_method"  # GET | POST
 EMAIL_VERIFICATION_CUSTOM_HEADERS = "email_verification_custom_headers"  # JSON object
 EMAIL_VERIFICATION_CUSTOM_BODY = "email_verification_custom_body"  # body template (POST only)
+# Minimum seconds between two verification requests made by the queue worker
+EMAIL_VERIFICATION_MIN_INTERVAL = "email_verification_min_interval_seconds"
+EMAIL_VERIFICATION_MIN_INTERVAL_DEFAULT = 2.0
 
 # Connection test tracking (set to "true" after a successful Test Connection run)
 EMAIL_VERIFICATION_CONNECTION_TESTED = "email_verification_connection_tested"

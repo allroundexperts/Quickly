@@ -39,6 +39,7 @@ export default function EmailVerificationSettings() {
   const [customMethod,       setCustomMethod]       = useState('GET');
   const [customHeaders,      setCustomHeaders]      = useState([]); // [{ key, value }]
   const [customBody,         setCustomBody]         = useState('');
+  const [minInterval,        setMinInterval]        = useState('2');
 
   // ── probe ──────────────────────────────────────────────────────────────────
   const [probeEmail,  setProbeEmail]  = useState('');
@@ -61,6 +62,7 @@ export default function EmailVerificationSettings() {
       const cm  = data.custom_method || 'GET';
       const ch  = Object.entries(data.custom_headers || {}).map(([key, value]) => ({ key, value: String(value) }));
       const cb  = data.custom_body || '';
+      const mi  = String(data.min_interval_seconds ?? 2);
       setEnabled(data.enabled || false);
       setProvider(p);
       setApiKeyMasked(data.api_key_masked || '');
@@ -72,9 +74,10 @@ export default function EmailVerificationSettings() {
       setCustomMethod(cm);
       setCustomHeaders(ch);
       setCustomBody(cb);
+      setMinInterval(mi);
       setConnectionTested(data.connection_tested || false);
       setCredsChanged(false);
-      savedStateRef.current = { provider: p, customUrl: cu, customField: cf, customValidValues: cvv, customInvalidValues: civ, customMethod: cm, customHeaders: headersKey(ch), customBody: cb };
+      savedStateRef.current = { provider: p, customUrl: cu, customField: cf, customValidValues: cvv, customInvalidValues: civ, customMethod: cm, customHeaders: headersKey(ch), customBody: cb, minInterval: mi };
     }).catch(() => {});
   }, []);
 
@@ -84,6 +87,10 @@ export default function EmailVerificationSettings() {
     customHeaders.filter(h => h.key.trim()).map(h => [h.key.trim(), h.value])
   );
   const bodyForRequest = () => (customMethod === 'POST' ? customBody : '');
+  const minIntervalValue = () => {
+    const n = Number(minInterval);
+    return Number.isFinite(n) && n >= 0 ? Math.min(n, 3600) : undefined;
+  };
   // {email} may live in the URL, or (for POST) in the request body
   const configError = () => {
     if (!customUrl.trim()) return 'Enter the API URL';
@@ -115,12 +122,13 @@ export default function EmailVerificationSettings() {
         custom_method: customMethod,
         custom_headers: headersObject(),
         custom_body: bodyForRequest(),
+        min_interval_seconds: minIntervalValue(),
       };
       if (apiKey) payload.api_key = apiKey;
       const res = await api.post('/settings/email-verification', payload);
       setApiKey('');
       setApiKeyMasked(res.api_key_masked || '');
-      savedStateRef.current = { provider, customUrl, customField, customValidValues, customInvalidValues, customMethod, customHeaders: headersKey(customHeaders), customBody };
+      savedStateRef.current = { provider, customUrl, customField, customValidValues, customInvalidValues, customMethod, customHeaders: headersKey(customHeaders), customBody, minInterval };
       setCustomTestResults(null);
       // Any credential change resets tested state on the backend; mirror that locally
       if (credsChanged) {
@@ -251,6 +259,7 @@ export default function EmailVerificationSettings() {
                   custom_method: customMethod,
                   custom_headers: headersObject(),
                   custom_body: bodyForRequest(),
+                  min_interval_seconds: minIntervalValue(),
                   ...(apiKey ? { api_key: apiKey } : {}),
                 });
                 notify({ type: 'success', message: `Email verification ${next ? 'enabled' : 'disabled'}` });
@@ -597,6 +606,30 @@ export default function EmailVerificationSettings() {
             )}
             {/* ── end custom provider wizard ── */}
 
+            {/* ── Rate limit (applies to every provider) ── */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Minimum seconds between checks
+              </label>
+              <div className="flex items-center gap-2">
+                <div className="w-28">
+                  <input
+                    type="number"
+                    min="0"
+                    max="3600"
+                    step="0.5"
+                    className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-800 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-300"
+                    value={minInterval}
+                    onChange={e => setMinInterval(e.target.value)}
+                  />
+                </div>
+                <span className="text-xs text-gray-500">
+                  The verification queue sends at most one request this often. Raise it if your
+                  provider rate-limits you; 0 means no delay.
+                </span>
+              </div>
+            </div>
+
             {/* ── Save / Test connection ── */}
             <div className="space-y-2">
               {savedStateRef.current != null && (
@@ -608,6 +641,7 @@ export default function EmailVerificationSettings() {
                 customMethod !== savedStateRef.current.customMethod ||
                 headersKey(customHeaders) !== savedStateRef.current.customHeaders ||
                 customBody !== savedStateRef.current.customBody ||
+                minInterval !== savedStateRef.current.minInterval ||
                 !!apiKey
               ) && (
                 <p className="text-xs text-amber-600 font-medium">⚠ Unsaved changes — click Save to apply</p>

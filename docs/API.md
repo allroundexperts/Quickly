@@ -742,9 +742,36 @@ The detected `provider` value (e.g. `"google"`, `"office365"`) is stored on the 
 
 ### `POST /api/campaigns/{id}/leads/verify`
 
-Trigger background email verification for all unverified leads in a campaign. Requires email verification to be configured in Settings.
+Queue email verification for the campaign's unverified leads (plus any stuck in `pending`) as a verification job. Pass `?reverify=true` to re-check every lead. Requires email verification to be enabled and configured in Settings (otherwise **400**). If the campaign already has an active job, the leads are added to it.
 
-**Response:** `{ "ok": true, "queued": 42 }`
+**Response:** `{ "ok": true, "queued": 42, "needs_reverify": false, "total_verified": 10, "job": { ... } }` (`job` has the shape below)
+
+### Verification jobs
+
+Verification runs as durable jobs processed one lead at a time by a background worker, at most one request per `min_interval_seconds` (see the settings above, default 2 seconds). Progress is saved per lead, so jobs survive restarts and resume where they stopped.
+
+Job statuses: `queued`, `running`, `paused`, `completed`, `cancelled`. Item statuses: `pending`, `processing`, `done`, `failed` (the request to the provider failed: timeout, HTTP error, bad JSON; retryable), `cancelled`. Leads of failed items stay `pending` (not sent) until retried or the job is cancelled. If verification is disabled or misconfigured while a job runs, the job pauses with `last_error` set.
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/verification-jobs?campaign_id=&active_only=&limit=` | Jobs, newest first |
+| `GET /api/verification-jobs/{id}` | One job's progress |
+| `GET /api/verification-jobs/{id}/items?status=&limit=&offset=` | Leads in the job with `status`, `result_status`, `message`, `attempts` |
+| `POST /api/verification-jobs/{id}/pause` | Pause after the current lead |
+| `POST /api/verification-jobs/{id}/resume` | Resume a paused job |
+| `POST /api/verification-jobs/{id}/retry-failed` | Re-queue failed items → `{ "retried": n, "job": {...} }` |
+| `POST /api/verification-jobs/{id}/cancel` | Stop; unverified leads are released and send unverified → `{ "released": n, "job": {...} }` |
+
+**Job shape:**
+
+```json
+{
+  "id": 3, "campaign_id": 12, "status": "running", "reverify": false, "source": "campaign_verify",
+  "last_error": null, "created_at": "...", "started_at": "...", "finished_at": null,
+  "total": 120, "remaining": 70, "processing": 1, "done": 48, "failed": 2, "cancelled": 0,
+  "results": { "valid": 40, "invalid": 5, "catch_all": 3 }
+}
+```
 
 ### `GET /api/campaigns/{id}/leads/verification-status`
 
@@ -1663,7 +1690,8 @@ Return the current email verification configuration.
   "custom_invalid_values": [],
   "custom_method": "GET",
   "custom_headers": {},
-  "custom_body": ""
+  "custom_body": "",
+  "min_interval_seconds": 2.0
 }
 ```
 
@@ -1685,6 +1713,7 @@ Save email verification settings.
 | `custom_method` | string | `GET` or `POST` |
 | `custom_headers` | object | Extra request headers, e.g. `{"Authorization": "Bearer ..."}`. Values may contain `{email}` |
 | `custom_body` | string | Request body template for `POST` (`{email}` is substituted). JSON bodies are sent as `application/json` unless a `Content-Type` header is set. With a body, `{email}` may appear in the body instead of the URL |
+| `min_interval_seconds` | number | Minimum seconds between verification requests made by the queue (0–3600, default `2`). Omit to keep the current value |
 
 ### `POST /api/settings/email-verification/test`
 

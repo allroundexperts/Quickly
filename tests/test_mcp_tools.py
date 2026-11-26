@@ -53,9 +53,20 @@ async def test_campaign_tools_registered():
         "write_custom_email", "reconcile_personalized", "verify_campaign_leads",
         "get_campaign_verification_status", "detect_campaign_lead_providers",
         "list_campaign_queue", "list_campaign_sent_emails", "get_campaign_step_analytics",
-        "campaigns_have_leads",
+        "campaigns_have_leads", "list_verification_jobs", "get_verification_job",
+        "list_verification_job_items", "control_verification_job",
     }
     assert expected <= names
+
+
+async def test_control_verification_job_maps_actions(captured):
+    await _call("control_verification_job", {"job_id": 7, "action": "retry_failed"})
+    await _call("control_verification_job", {"job_id": 7, "action": "pause"})
+    bad = await _call("control_verification_job", {"job_id": 7, "action": "explode"})
+    retry, pause = captured
+    assert (retry.method, retry.url.path) == ("POST", "/api/verification-jobs/7/retry-failed")
+    assert pause.url.path == "/api/verification-jobs/7/pause"
+    assert "action must be one of" in json.dumps(bad, default=str)
 
 
 async def test_create_campaign_sends_only_provided_fields(captured):
@@ -110,8 +121,17 @@ async def test_import_csv_uploads_multipart(captured):
     (req,) = captured
     assert req.url.path == "/api/campaigns/4/leads/import"
     assert req.url.params["skip_duplicates"] == "true"
+    assert req.url.params["verify_emails"] == "true"
     assert req.headers["content-type"].startswith("multipart/form-data")
     assert b"x@example.com" in req.content
+
+
+async def test_add_campaign_leads_verifies_by_default(captured):
+    await _call("add_campaign_leads", {"campaign_id": 4, "leads": [{"email": "x@example.com"}]})
+    await _call("add_campaign_leads", {"campaign_id": 4, "leads": [{"email": "y@example.com"}], "verify_emails": False})
+    default, opted_out = captured
+    assert default.url.params["verify_emails"] == "true"
+    assert opted_out.url.params["verify_emails"] == "false"
 
 
 async def test_export_csv_returns_text(captured):

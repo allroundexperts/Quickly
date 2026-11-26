@@ -54,6 +54,7 @@ from app.routers import app_oauth as app_oauth_router
 from app.routers import notifications as notifications_router
 from app.routers import system_health as system_health_router
 from app.routers import analytics as analytics_router
+from app.routers import verification_jobs as verification_jobs_router
 from app.jobs import run_send_job, run_slot_scan_job, last_send_job_run, last_send_job_sent_count
 from app.unibox import queue_sync_for_all_inboxes, run_unibox_sync_job
 from app import time as time_provider
@@ -156,7 +157,14 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(queue_sync_for_all_inboxes(reason="startup")),
         ]
 
+        # Durable email-verification queue (resumes unfinished jobs after a restart)
+        from app import verification_queue
+
+        await verification_queue.start_worker()
+
         yield
+
+        await verification_queue.stop_worker()
 
         # Cancel any still-running startup tasks before the event loop closes.
         for task in startup_tasks:
@@ -269,6 +277,7 @@ app.include_router(beacon_ingest_router.router)
 app.include_router(notifications_router.router, dependencies=_auth_deps)
 app.include_router(system_health_router.router, dependencies=_auth_deps)
 app.include_router(analytics_router.router, dependencies=_auth_deps)
+app.include_router(verification_jobs_router.router, dependencies=_auth_deps)
 
 # lightweight public utility for MX-based provider detection
 app.include_router(email_provider_router.router)
