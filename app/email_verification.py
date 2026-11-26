@@ -7,6 +7,7 @@ in ``PROVIDERS``.
 import asyncio
 import json
 import logging
+import re
 from abc import ABC, abstractmethod
 from typing import Any
 from urllib.parse import quote
@@ -103,16 +104,38 @@ class MailtesterNinjaProvider(BaseVerificationProvider):
 
 # ── Custom HTTP provider ──────────────────────────────────────────────────────
 
-def _get_nested(data: Any, path: str) -> Any:
-    """Traverse *data* following a dot-separated *path*.  Returns None if any
-    segment is missing or the value is not a dict."""
+_MISSING = object()
+
+
+def _path_parts(path: str) -> list[str]:
+    """Split a field path into segments.  Accepts ``a.b.c``, list indexes as
+    ``items.0.status`` or ``items[0].status``, and an optional ``$.`` prefix."""
+    path = (path or "").strip()
+    if path.startswith("$"):
+        path = path[1:].lstrip(".")
+    path = re.sub(r"\[(\d+)\]", r".\1", path)
+    return [p for p in path.split(".") if p != ""]
+
+
+def _lookup(data: Any, path: str) -> Any:
+    """Like :func:`_get_nested` but returns ``_MISSING`` when the path does not
+    exist (so a present ``null`` can be told apart from a missing field)."""
     value: Any = data
-    for part in path.split("."):
-        if isinstance(value, dict):
-            value = value.get(part)
+    for part in _path_parts(path):
+        if isinstance(value, dict) and part in value:
+            value = value[part]
+        elif isinstance(value, list) and part.lstrip("-").isdigit() and -len(value) <= int(part) < len(value):
+            value = value[int(part)]
         else:
-            return None
+            return _MISSING
     return value
+
+
+def _get_nested(data: Any, path: str) -> Any:
+    """Traverse *data* following *path* (see :func:`_path_parts`).  Returns
+    None if any segment is missing."""
+    value = _lookup(data, path)
+    return None if value is _MISSING else value
 
 
 def custom_config_error(url_template: str, method: str = "GET", body_template: str = "") -> str | None:
@@ -202,13 +225,17 @@ class CustomHttpProvider(BaseVerificationProvider):
                     resp = await client.get(url, headers=headers, timeout=15)
                 if resp.status_code != 200:
                     return VerificationResult(
-                        email, UNKNOWN, message=f"HTTP {resp.status_code}", error=True
+                        email, UNKNOWN,
+                        raw={"http_status": resp.status_code, "body": resp.text[:2000]},
+                        message=f"HTTP {resp.status_code}", error=True,
                     )
                 try:
                     data = resp.json()
                 except Exception:
                     return VerificationResult(
-                        email, UNKNOWN, message="Response was not valid JSON", error=True
+                        email, UNKNOWN,
+                        raw={"http_status": resp.status_code, "body": resp.text[:2000]},
+                        message="Response was not valid JSON", error=True,
                     )
                 return self._normalise(email, data)
             except httpx.RequestError as exc:
@@ -220,10 +247,11 @@ class CustomHttpProvider(BaseVerificationProvider):
     def _normalise(self, email: str, data: Any) -> VerificationResult:
         raw_value = _get_nested(data, self.field_path) if self.field_path else None
         str_val = str(raw_value).strip().lower() if raw_value is not None else ""
-        if str_val in self.valid_values:
-            status = VALID
-        elif str_val in self.invalid_values:
+        # A value listed as both good and bad counts as bad (the safer choice)
+        if str_val in self.invalid_values:
             status = INVALID
+        elif str_val in self.valid_values:
+            status = VALID
         else:
             status = UNKNOWN
         message = f"field '{self.field_path}' = {raw_value!r}"

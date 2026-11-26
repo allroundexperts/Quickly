@@ -526,6 +526,16 @@ export default function EmailVerificationSettings() {
                       />
                     </div>
                   </div>
+                  {(() => {
+                    const bad = new Set(parseValues(customInvalidValues).map(v => v.toLowerCase()));
+                    const both = [...new Set(parseValues(customValidValues).map(v => v.toLowerCase()))].filter(v => bad.has(v));
+                    return both.length > 0 ? (
+                      <p className="text-xs text-amber-600 mt-2">
+                        ⚠ {both.map(v => `"${v}"`).join(', ')} {both.length === 1 ? 'is' : 'are'} in both lists and
+                        will be treated as Bad (skipped). Remove {both.length === 1 ? 'it' : 'them'} from one list.
+                      </p>
+                    ) : null;
+                  })()}
                 </div>
 
                 {/* ── Step 5: Run test ── */}
@@ -574,12 +584,10 @@ export default function EmailVerificationSettings() {
                           {customTestResults.map((r, i) => {
                             const s = STATUS_ICON[r.status] || { icon: '', label: r.status, cls: 'text-gray-500' };
                             return (
-                              <tr key={i} className="hover:bg-gray-50 dark:hover:bg-gray-800/40">
+                              <tr key={i} className="hover:bg-gray-50 dark:hover:bg-gray-800/40 align-top">
                                 <td className="px-3 py-2 font-mono">{r.email}</td>
                                 <td className="px-3 py-2 font-mono text-gray-600 dark:text-gray-400">
-                                  {r.raw_field_value != null
-                                    ? String(r.raw_field_value)
-                                    : <span className="text-gray-400 italic">—</span>}
+                                  <ReturnedValue result={r} fieldPath={customField} />
                                 </td>
                                 <td className={`px-3 py-2 ${s.cls}`}>
                                   {s.icon} {s.label}
@@ -590,7 +598,20 @@ export default function EmailVerificationSettings() {
                         </tbody>
                       </table>
                     </div>
-                    {customTestResults.some(r => r.status === 'unknown') && (
+                    {customTestResults.some(r => r.error) && (
+                      <p className="text-xs text-red-600 mt-2">
+                        ✗ Some requests failed, so those emails couldn't be checked. Click "response" on a row to see
+                        what your API sent back (often a missing or wrong API key header, or a wrong URL).
+                      </p>
+                    )}
+                    {customTestResults.some(r => !r.error && !r.field_found) && (
+                      <p className="text-xs text-amber-600 mt-2">
+                        ⚠ The field <code className="font-mono">{customField || '(empty)'}</code> wasn't found in some
+                        responses. Click "response" to see the actual shape and fix step 3 (e.g.{' '}
+                        <code className="font-mono">data.status</code> or <code className="font-mono">results.0.status</code>).
+                      </p>
+                    )}
+                    {customTestResults.some(r => r.status === 'unknown' && !r.error && r.field_found) && (
                       <p className="text-xs text-amber-600 mt-2">
                         ⚠ Some emails came back as unknown — the value your API returned isn't in your Good or Bad
                         list. Add it above, or leave it to allow those emails through.
@@ -689,6 +710,46 @@ export default function EmailVerificationSettings() {
 }
 
 /* ── small helpers ── */
+// "API returned" cell for the run-test table: the mapped value, or why there isn't one
+function ReturnedValue({ result, fieldPath }) {
+  const [open, setOpen] = useState(false);
+  let content;
+  if (result.error) {
+    content = <span className="text-red-600 font-sans">Request failed: {result.message}</span>;
+  } else if (!result.field_found) {
+    content = (
+      <span className="text-amber-600 font-sans">
+        Field <code className="font-mono">{fieldPath || '(empty)'}</code> not found
+      </span>
+    );
+  } else if (result.raw_field_value === null || result.raw_field_value === undefined) {
+    content = <span className="text-gray-400 italic">null</span>;
+  } else {
+    content = typeof result.raw_field_value === 'object'
+      ? JSON.stringify(result.raw_field_value)
+      : String(result.raw_field_value);
+  }
+  return (
+    <div>
+      {content}
+      {result.raw_response && Object.keys(result.raw_response).length > 0 && (
+        <button
+          type="button"
+          className="ml-2 text-[11px] text-teal-600 hover:underline font-sans"
+          onClick={() => setOpen(v => !v)}
+        >
+          {open ? 'hide response' : 'response'}
+        </button>
+      )}
+      {open && (
+        <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-gray-100 dark:bg-gray-900 p-2 text-[11px] text-gray-700 dark:text-gray-300">
+          {JSON.stringify(result.raw_response, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 // Stable string form of the header rows, for unsaved-change detection
 function headersKey(rows) {
   return JSON.stringify(rows.filter(h => h.key.trim()).map(h => [h.key.trim(), h.value]));

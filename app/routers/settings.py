@@ -1179,7 +1179,7 @@ async def test_custom_email_verification(
 
     Pass ``test_emails`` to override the default sample selection.
     """
-    from app.email_verification import CustomHttpProvider, _get_nested
+    from app.email_verification import _MISSING, CustomHttpProvider, _lookup
     from app.models import Inbox, Lead
 
     provider = CustomHttpProvider(
@@ -1224,11 +1224,18 @@ async def test_custom_email_verification(
         vr = await provider.verify(email, "")
         # Extract the mapped field value for display
         raw_field_value = None
-        if vr.raw and payload.field_path:
-            raw_field_value = _get_nested(vr.raw, payload.field_path)
+        field_found = False
+        if not vr.error and payload.field_path:
+            found = _lookup(vr.raw, payload.field_path)
+            field_found = found is not _MISSING
+            raw_field_value = None if found is _MISSING else found
         results.append({
             "email": email,
             "source": source,
+            # error: the request itself failed (HTTP error, timeout, non-JSON);
+            # see "message". field_found: the field path exists in the response.
+            "error": vr.error,
+            "field_found": field_found,
             "status": vr.status,
             "raw_field_value": raw_field_value,
             "raw_response": vr.raw,
