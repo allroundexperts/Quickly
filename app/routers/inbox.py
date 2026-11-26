@@ -222,6 +222,27 @@ async def list_inboxes(db: AsyncSession = Depends(get_db)):
     return inboxes
 
 
+@router.get("/domain-blocklist")
+async def inbox_domain_blocklist(refresh: bool = False, db: AsyncSession = Depends(get_db)):
+    """Check each unique sending domain against major domain blocklists.
+
+    Results are cached in memory for a few hours; pass ``refresh=true`` to
+    force a fresh lookup.
+    """
+    from app.domain_blocklist import check_domains, normalise_domain
+
+    result = await db.execute(select(Inbox.id, Inbox.email))
+    rows = result.all()
+    inbox_domains = {row[0]: normalise_domain(row[1]) for row in rows}
+    domains = await check_domains(
+        [d for d in inbox_domains.values() if d], refresh=refresh
+    )
+    return {
+        "domains": domains,
+        "inboxes": {str(k): v for k, v in inbox_domains.items() if v},
+    }
+
+
 @router.post("", response_model=InboxResponse)
 async def create_inbox(data: InboxCreate, db: AsyncSession = Depends(get_db)):
     # Normalise tracking domain: strip scheme, paths, whitespace

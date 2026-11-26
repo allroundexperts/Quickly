@@ -784,6 +784,37 @@ Inboxes are sending email addresses connected via Gmail OAuth, Office 365 OAuth,
 
 List all inboxes. Each includes a `sent_today` count.
 
+### `GET /api/inboxes/domain-blocklist`
+
+Check every unique sending domain (the part after `@` in each inbox email) against major domain blocklists: Spamhaus DBL (`dbl.spamhaus.org`), SURBL (`multi.surbl.org`) and URIBL (`multi.uribl.com`). Lookups run server-side and concurrently with a short timeout; results are cached in memory for 6 hours (30 minutes when a list could not be queried).
+
+**Query:** `refresh` (bool, default `false`) bypasses the cache.
+
+Return codes that mean the list refused the query (e.g. Spamhaus `127.255.255.x`, URIBL/SURBL `127.0.0.1`, usually because the server uses a public resolver) are reported under `unavailable`, never as a listing.
+
+**Response:**
+
+```json
+{
+  "domains": {
+    "example.com": {
+      "domain": "example.com",
+      "listed": true,
+      "listings": [
+        { "list": "Spamhaus DBL", "zone": "dbl.spamhaus.org", "codes": ["127.0.1.2"], "meanings": ["spam domain"] }
+      ],
+      "unavailable": [
+        { "list": "URIBL", "zone": "multi.uribl.com", "reason": "query refused (public resolver or rate limit)" }
+      ],
+      "checked_at": "2026-11-26T10:00:00+00:00"
+    }
+  },
+  "inboxes": { "1": "example.com" }
+}
+```
+
+The Inboxes page shows a **Blocklisted** badge on each inbox whose domain is listed; hovering it names the list(s) and what the return code means.
+
 ### `POST /api/inboxes`
 
 Create an inbox manually (most inboxes are created automatically during the OAuth flow).

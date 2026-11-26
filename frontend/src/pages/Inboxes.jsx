@@ -644,8 +644,46 @@ function InboxTrackingOptions({
   );
 }
 
+function inboxDomain(email) {
+  const raw = (email || '').trim().toLowerCase();
+  const at = raw.lastIndexOf('@');
+  return at >= 0 ? raw.slice(at + 1).replace(/\.+$/, '') : '';
+}
+
+function BlocklistBadge({ info }) {
+  if (!info?.listed) return null;
+  const lists = info.listings.map((l) => l.list).join(', ');
+  return (
+    <span className="relative group inline-flex" aria-label={`${info.domain} is listed on ${lists}`}>
+      <span className="inline-flex items-center gap-1 text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-medium cursor-help">
+        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v3.75m0 3.75h.008M10.34 3.94L1.82 18.5A1.875 1.875 0 003.44 21.3h17.12a1.875 1.875 0 001.62-2.8L13.66 3.94a1.875 1.875 0 00-3.32 0z" />
+        </svg>
+        Blocklisted
+      </span>
+      <span
+        role="tooltip"
+        className="pointer-events-none invisible opacity-0 group-hover:visible group-hover:opacity-100 transition-opacity absolute right-0 top-full mt-2 z-30 w-72 rounded-lg border border-gray-200 bg-white shadow-lg p-3 text-left text-xs font-normal text-gray-700 whitespace-normal"
+      >
+        <span className="block font-semibold text-red-700 mb-1">
+          {info.domain} is on {info.listings.length === 1 ? 'a domain blocklist' : `${info.listings.length} domain blocklists`}
+        </span>
+        {info.listings.map((l) => (
+          <span key={l.zone} className="block mt-1">
+            <span className="font-medium text-gray-900">{l.list}</span>
+            <span className="text-gray-400"> ({l.zone})</span>
+            {l.meanings?.length > 0 && <span className="block text-gray-600">{l.meanings.join(', ')}</span>}
+          </span>
+        ))}
+        <span className="block mt-2 text-gray-500">Mail from or linking to this domain is likely to be filtered as spam.</span>
+      </span>
+    </span>
+  );
+}
+
 export default function Inboxes() {
   const [inboxes, setInboxes] = useState(() => apiCache.get('/inboxes') || []);
+  const [domainBlocklist, setDomainBlocklist] = useState({});
   const [cnameTarget, setCnameTarget] = useState('');
   const [customTrackingCnameUiEnabled, setCustomTrackingCnameUiEnabled] = useState(true);
   // state used for both add and edit forms
@@ -754,6 +792,20 @@ export default function Inboxes() {
 
   // ---- Token expiry visual indicator (from system health data) ----
   const { rawData } = useSystemHealth();
+  // Domain blocklist (DNSBL/URIBL) status for each unique sending domain.
+  const inboxDomainsKey = useMemo(
+    () => [...new Set(inboxes.map((i) => inboxDomain(i.email)).filter(Boolean))].sort().join(','),
+    [inboxes],
+  );
+  useEffect(() => {
+    if (!inboxDomainsKey) return undefined;
+    let cancelled = false;
+    api.get('/inboxes/domain-blocklist')
+      .then((d) => { if (!cancelled) setDomainBlocklist(d?.domains || {}); })
+      .catch(() => { /* blocklist status is best-effort */ });
+    return () => { cancelled = true; };
+  }, [inboxDomainsKey]);
+
   const expiredInboxIds = useMemo(() => {
     if (!rawData) return new Set();
     const ids = new Set();
@@ -1646,6 +1698,7 @@ export default function Inboxes() {
                             ? <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full font-medium">Unknown</span>
                             : <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">Active</span>
                       }
+                      <BlocklistBadge info={domainBlocklist[inboxDomain(inbox.email)]} />
                       {expiredInboxIds.has(inbox.id) && (
                         <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-medium">
                           Token Expired
